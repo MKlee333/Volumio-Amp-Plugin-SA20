@@ -1,0 +1,40 @@
+{
+  "name": "arcam_sa20",
+  "version": "0.7.0",
+  "description": "ARCAM SA20 network control plugin for Volumio with stable volume override and play automation",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"No test specified\" && exit 0"
+  },
+  "author": "OpenAI",
+  "license": "MIT",
+  "repository": "",
+  "volumio_info": {
+    "prettyName": "ARCAM SA20",
+    "icon": "fa-volume-up",
+    "plugin_type": "system_hardware",
+    "architectures": [
+      "arm",
+      "armv7",
+      "armv8",
+      "x86_amd64"
+    ],
+    "os": [
+      "buster",
+      "bullseye",
+      "bookworm"
+    ],
+    "details": "Controls an ARCAM SA20 amplifier over the documented TCP protocol on port 50000. Uses a stabilized Volumio volume override and can power on / source-switch / set startup volume on Play.",
+    "changelog": "0.18.0 Stop Volumio playback after 5 minutes if the SA20 becomes unavailable or is no longer on while playback is active; keep polling and status reflection.",
+    "version": "0.18.0"
+  },
+  "engines": {
+    "node": ">=8",
+    "volumio": ">=3"
+  },
+  "dependencies": {
+    "kew": "^0.7.0",
+    "socket.io-client": "^2.4.0",
+    "v-conf": "^1.4.2"
+  }
+}

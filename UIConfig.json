@@ -1,0 +1,349 @@
+{
+  "page": {
+    "label": "ARCAM SA20"
+  },
+  "sections": [
+    {
+      "id": "section_connection",
+      "element": "section",
+      "label": "Connection",
+      "icon": "fa-plug",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "system_hardware/arcam_sa20",
+        "method": "saveConnectionConfig"
+      },
+      "saveButton": {
+        "label": "Save connection",
+        "data": [
+          "host",
+          "port",
+          "timeoutMs"
+        ]
+      },
+      "content": [
+        {
+          "id": "statusSummary",
+          "element": "input",
+          "type": "text",
+          "label": "Current SA20 status",
+          "value": "PWR - | SRC - | VOL - | MUTE - | BAL -",
+          "attributes": [
+            "disabled"
+          ]
+        },
+        {
+          "id": "host",
+          "element": "input",
+          "type": "text",
+          "label": "SA20 host / IP",
+          "doc": "Manual network target for the amplifier. Automatic discovery is not used.",
+          "value": "192.168.178.27"
+        },
+        {
+          "id": "port",
+          "element": "input",
+          "type": "number",
+          "label": "TCP port",
+          "doc": "Arcam network control port",
+          "value": 50000
+        },
+        {
+          "id": "timeoutMs",
+          "element": "input",
+          "type": "number",
+          "label": "Timeout ms",
+          "doc": "Socket timeout in milliseconds",
+          "value": 3000
+        },
+        {
+          "id": "testConnection",
+          "element": "button",
+          "label": "Test TCP connection",
+          "description": "Open a TCP connection to the configured amplifier",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "testConnection",
+              "data": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "section_playback_automation",
+      "element": "section",
+      "label": "Playback automation",
+      "icon": "fa-play-circle",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "system_hardware/arcam_sa20",
+        "method": "saveBehaviorConfig"
+      },
+      "saveButton": {
+        "label": "Save playback automation",
+        "data": [
+          "autoPowerOnPlay",
+          "switchSourceOnPlay",
+          "playSource",
+          "setVolumeOnPlay",
+          "playVolume",
+          "powerOnDelayMs",
+          "debugLogging",
+          "autoPowerOffOnIdle",
+          "idlePowerOffDelaySec"
+        ]
+      },
+      "content": [
+        {
+          "id": "autoPowerOnPlay",
+          "element": "switch",
+          "label": "Power on SA20 when Volumio changes to Play",
+          "value": true
+        },
+        {
+          "id": "switchSourceOnPlay",
+          "element": "switch",
+          "label": "Set source when Play starts",
+          "value": true
+        },
+        {
+          "id": "playSource",
+          "element": "select",
+          "label": "Playback source",
+          "value": {
+            "value": "CD",
+            "label": "CD"
+          },
+          "options": [
+            {
+              "value": "Phono",
+              "label": "Phono"
+            },
+            {
+              "value": "AUX",
+              "label": "AUX"
+            },
+            {
+              "value": "PVR",
+              "label": "PVR"
+            },
+            {
+              "value": "AV",
+              "label": "AV"
+            },
+            {
+              "value": "STB",
+              "label": "STB"
+            },
+            {
+              "value": "CD",
+              "label": "CD"
+            },
+            {
+              "value": "BD",
+              "label": "BD"
+            },
+            {
+              "value": "SAT",
+              "label": "SAT"
+            }
+          ]
+        },
+        {
+          "id": "setVolumeOnPlay",
+          "element": "switch",
+          "label": "Set saved startup volume on Play",
+          "value": true
+        },
+        {
+          "id": "playVolume",
+          "element": "input",
+          "type": "number",
+          "label": "Saved startup volume 0..99",
+          "value": 30
+        },
+        {
+          "id": "powerOnDelayMs",
+          "element": "input",
+          "type": "number",
+          "label": "Delay after power-on (ms)",
+          "doc": "Wait time before source and volume commands are sent after waking the amplifier",
+          "value": 3500
+        },
+        {
+          "id": "debugLogging",
+          "element": "switch",
+          "label": "Verbose plugin log",
+          "value": false
+        },
+        {
+          "id": "autoPowerOffOnIdle",
+          "element": "switch",
+          "label": "Auto-standby when Volumio is not playing",
+          "doc": "Only power off if the amplifier is still on the configured playback source.",
+          "value": false
+        },
+        {
+          "id": "idlePowerOffDelaySec",
+          "element": "input",
+          "type": "number",
+          "label": "Idle auto-standby delay (s)",
+          "doc": "After this many seconds without Play, power off the SA20 if it still uses the playback source.",
+          "value": 900
+        }
+      ]
+    },
+    {
+      "id": "section_manual_control",
+      "element": "section",
+      "label": "Manual control",
+      "icon": "fa-sliders",
+      "onSave": {
+        "type": "controller",
+        "endpoint": "system_hardware/arcam_sa20",
+        "method": "applyManualControls"
+      },
+      "saveButton": {
+        "label": "Apply source / volume / balance",
+        "data": [
+          "manualSource",
+          "manualVolume",
+          "manualBalance"
+        ]
+      },
+      "content": [
+        {
+          "id": "manualSource",
+          "element": "select",
+          "label": "Manual source",
+          "value": {
+            "value": "CD",
+            "label": "CD"
+          },
+          "options": [
+            {
+              "value": "Phono",
+              "label": "Phono"
+            },
+            {
+              "value": "AUX",
+              "label": "AUX"
+            },
+            {
+              "value": "PVR",
+              "label": "PVR"
+            },
+            {
+              "value": "AV",
+              "label": "AV"
+            },
+            {
+              "value": "STB",
+              "label": "STB"
+            },
+            {
+              "value": "CD",
+              "label": "CD"
+            },
+            {
+              "value": "BD",
+              "label": "BD"
+            },
+            {
+              "value": "SAT",
+              "label": "SAT"
+            }
+          ]
+        },
+        {
+          "id": "manualVolume",
+          "element": "input",
+          "type": "number",
+          "label": "Manual volume 0..99",
+          "value": 30
+        },
+        {
+          "id": "manualBalance",
+          "element": "input",
+          "type": "number",
+          "label": "Manual balance -12..+12",
+          "value": 0
+        },
+        {
+          "id": "powerOn",
+          "element": "button",
+          "label": "Power On",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "powerOn",
+              "data": ""
+            }
+          }
+        },
+        {
+          "id": "powerOff",
+          "element": "button",
+          "label": "Standby",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "powerOff",
+              "data": ""
+            }
+          }
+        },
+        {
+          "id": "muteToggle",
+          "element": "button",
+          "label": "Mute toggle",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "muteToggle",
+              "data": ""
+            }
+          }
+        },
+        {
+          "id": "volumeUp",
+          "element": "button",
+          "label": "Volume +1",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "volumeUp",
+              "data": ""
+            }
+          }
+        },
+        {
+          "id": "volumeDown",
+          "element": "button",
+          "label": "Volume -1",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "volumeDown",
+              "data": ""
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
