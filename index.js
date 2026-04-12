@@ -48,6 +48,7 @@ function ArcamSa20Plugin(context) {
   this.cachedMute = false;
   this.idlePowerOffTimer = null;
   this.ampUnavailableStopTimer = null;
+  this.nativeVolumeSettings = null;
 }
 
 ArcamSa20Plugin.prototype.onVolumioStart = function() {
@@ -329,18 +330,51 @@ ArcamSa20Plugin.prototype.getVolumeObject = function() {
   });
 };
 
+ArcamSa20Plugin.prototype._getAlsaConfigParam = function(key, fallbackValue) {
+  try {
+    const value = this.commandRouter.executeOnPlugin('audio_interface', 'alsa_controller', 'getConfigParam', key);
+    return typeof value === 'undefined' || value === null ? fallbackValue : value;
+  } catch (e) {
+    return fallbackValue;
+  }
+};
+
+ArcamSa20Plugin.prototype._readNativeVolumeSettings = function() {
+  const device = this._getAlsaConfigParam('outputdevice', '');
+  if (!device) {
+    return null;
+  }
+
+  return {
+    device: device,
+    devicename: this._getAlsaConfigParam('devicename', ''),
+    mixer: this._getAlsaConfigParam('mixer', ''),
+    mixertype: this._getAlsaConfigParam('mixertype', this._getAlsaConfigParam('mixer_type', 'hardware')),
+    maxvolume: this._clampInt(this._getAlsaConfigParam('maxvolume', this._getAlsaConfigParam('max_volume', 100)), 1, 100, 100),
+    volumecurve: this._getAlsaConfigParam('volumecurve', 'logarithmic'),
+    volumesteps: this._clampInt(this._getAlsaConfigParam('volumesteps', 1), 1, 20, 1)
+  };
+};
+
 ArcamSa20Plugin.prototype.initVolumeSettings = function() {
+  const nativeSettings = this._readNativeVolumeSettings();
+  if (!nativeSettings) {
+    this.logger.warn('[arcam_sa20] skipping volume override because no ALSA outputdevice is configured');
+    return libQ.resolve();
+  }
+
+  this.nativeVolumeSettings = nativeSettings;
   const volSettingsData = {
     pluginType: 'system_hardware',
     pluginName: 'arcam_sa20',
     volumeOverride: true,
-    device: this.commandRouter.executeOnPlugin('audio_interface', 'alsa_controller', 'getConfigParam', 'outputdevice'),
+    device: nativeSettings.device,
     devicename: 'ARCAM SA20',
-    mixer: '',
-    mixertype: 'None',
+    mixer: nativeSettings.mixer,
+    mixertype: nativeSettings.mixertype,
     maxvolume: 99,
-    volumecurve: '',
-    volumesteps: 1,
+    volumecurve: nativeSettings.volumecurve,
+    volumesteps: nativeSettings.volumesteps,
     currentmute: !!this.cachedMute,
     name: 'ARCAM SA20'
   };
@@ -349,16 +383,15 @@ ArcamSa20Plugin.prototype.initVolumeSettings = function() {
 };
 
 ArcamSa20Plugin.prototype.resetVolumeSettings = function() {
-  const volSettingsData = {
-    device: this.commandRouter.executeOnPlugin('audio_interface', 'alsa_controller', 'getConfigParam', 'outputdevice'),
-    devicename: '',
-    mixer: '',
-    mixertype: 'None',
-    maxvolume: 100,
-    volumecurve: 'logarithmic',
-    volumesteps: 1,
+  const nativeSettings = this.nativeVolumeSettings || this._readNativeVolumeSettings();
+  if (!nativeSettings) {
+    return libQ.resolve();
+  }
+
+  const volSettingsData = Object.assign({}, nativeSettings, {
+    volumeOverride: false,
     currentmute: false
-  };
+  });
 
   return this.commandRouter.volumioUpdateVolumeSettings(volSettingsData)
     .fail(() => libQ.resolve());
