@@ -20,6 +20,9 @@ Stability notes for v0.5.0:
 Notes:
 - Automatic discovery is not implemented in this build.
 - Default Arcam TCP port is 50000.
-
-
 - If the SA20 becomes unavailable or is no longer on while Volumio is still playing, the plugin stops Volumio playback after 5 minutes.
+
+Operational notes:
+- The plugin does not install or manage ALSA drivers on the Raspberry Pi.
+- A Volumio runtime issue was traced to the internal ALSA alias `volumio`, not to this plugin's TCP/IP control logic.
+- See `docs/volumio-alsa-recovery.md` for the failure signature, root cause, and the recovery steps that were applied on the target Volumio system.
