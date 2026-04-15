@@ -1185,13 +1185,22 @@ ArcamSa20Plugin.prototype._tryExtractAmpResponseFrame = function() {
     this.ampSocketBuffer = this.ampSocketBuffer.slice(startIndex);
   }
 
-  const endIndex = this.ampSocketBuffer.indexOf(0x0D, 1);
-  if (endIndex === -1) {
+  if (this.ampSocketBuffer.length < 6) {
     return null;
   }
 
-  const frame = this.ampSocketBuffer.slice(0, endIndex + 1);
-  this.ampSocketBuffer = this.ampSocketBuffer.slice(endIndex + 1);
+  const declaredLength = this.ampSocketBuffer[4];
+  const frameLength = 6 + declaredLength;
+  if (this.ampSocketBuffer.length < frameLength) {
+    return null;
+  }
+  if (this.ampSocketBuffer[frameLength - 1] !== 0x0D) {
+    this.ampSocketBuffer = this.ampSocketBuffer.slice(1);
+    return this._tryExtractAmpResponseFrame();
+  }
+
+  const frame = this.ampSocketBuffer.slice(0, frameLength);
+  this.ampSocketBuffer = this.ampSocketBuffer.slice(frameLength);
   return frame;
 };
 
@@ -1432,11 +1441,16 @@ ArcamSa20Plugin.prototype._parseResponse = function(buffer) {
     throw new Error('invalid end byte');
   }
 
+  const declaredLength = buffer[4];
+  const expectedLength = 6 + declaredLength;
+  if (buffer.length !== expectedLength) {
+    throw new Error('response length mismatch');
+  }
   return {
     zone: buffer[1],
     command: buffer[2],
     answerCode: buffer[3],
-    declaredLength: buffer[4],
+    declaredLength: declaredLength,
     data: Array.from(buffer.slice(5, -1)),
     rawHex: Array.from(buffer).map((b) => ('0' + b.toString(16)).slice(-2).toUpperCase()).join(' ')
   };
