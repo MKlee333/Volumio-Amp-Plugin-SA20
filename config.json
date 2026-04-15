@@ -94,5 +94,13 @@
   "statusSummary": {
     "type": "string",
     "value": "PWR - | SRC - | VOL - | MUTE - | BAL -"
+  },
+  "defaultPresetInitialized": {
+    "type": "boolean",
+    "value": false
+  },
+  "defaultPresetJson": {
+    "type": "string",
+    "value": ""
   }
 }
