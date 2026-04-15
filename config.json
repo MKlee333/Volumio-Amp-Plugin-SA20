@@ -27,11 +27,19 @@
     "type": "string",
     "value": "CD"
   },
+  "manualSource": {
+    "type": "string",
+    "value": "CD"
+  },
   "setVolumeOnPlay": {
     "type": "boolean",
     "value": true
   },
   "playVolume": {
+    "type": "number",
+    "value": 30
+  },
+  "manualVolume": {
     "type": "number",
     "value": 30
   },
@@ -63,7 +71,15 @@
     "type": "string",
     "value": "0"
   },
+  "manualBalance": {
+    "type": "number",
+    "value": 0
+  },
   "autoPowerOffOnIdle": {
+    "type": "boolean",
+    "value": false
+  },
+  "stopPlaybackWhenAmpUnavailable": {
     "type": "boolean",
     "value": false
   },

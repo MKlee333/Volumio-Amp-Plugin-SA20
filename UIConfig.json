@@ -94,6 +94,7 @@
           "powerOnDelayMs",
           "debugLogging",
           "autoPowerOffOnIdle",
+          "stopPlaybackWhenAmpUnavailable",
           "idlePowerOffDelaySec"
         ]
       },
@@ -185,6 +186,13 @@
           "element": "switch",
           "label": "Auto-standby when Volumio is not playing",
           "doc": "Only power off if the amplifier is still on the configured playback source.",
+          "value": false
+        },
+        {
+          "id": "stopPlaybackWhenAmpUnavailable",
+          "element": "switch",
+          "label": "Stop Volumio if the SA20 becomes unavailable during Play",
+          "doc": "If enabled, the plugin stops Volumio only after repeated evidence that the amplifier is in standby or unreachable while playback is active.",
           "value": false
         },
         {
