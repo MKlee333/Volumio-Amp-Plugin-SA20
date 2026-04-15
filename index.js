@@ -104,6 +104,7 @@ function ArcamSa20Plugin(context) {
   this.lastPushedStatusSummary = null;
   this.manualApplyRunning = false;
   this.userCommandRunning = false;
+  this.startupRetryTimers = [];
 }
 
 ArcamSa20Plugin.prototype.onVolumioStart = function() {
@@ -118,6 +119,7 @@ ArcamSa20Plugin.prototype.onStart = function() {
   const defer = libQ.defer();
   try {
     conf.loadFile(CONFIG_FILE);
+    this._clearStartupRetryTimers();
     this.cachedVolume = this._clampInt(conf.get('lastVolume'), 0, 99, this._clampInt(conf.get('playVolume'), 0, 99, 30));
     this.cachedMute = conf.get('lastMute') === 'Muted';
     this._activateSocketIO();
@@ -129,15 +131,7 @@ ArcamSa20Plugin.prototype.onStart = function() {
       })
       .then(() => this.queryStatusSilent())
       .then(() => {
-        setTimeout(() => {
-          this.initVolumeSettings().fail(() => libQ.resolve());
-        }, 4000);
-        setTimeout(() => {
-          this.initVolumeSettings().fail(() => libQ.resolve());
-        }, 12000);
-        setTimeout(() => {
-          this.initVolumeSettings().fail(() => libQ.resolve());
-        }, 25000);
+        this._scheduleStartupRetryTimers();
         this._startLiveStatusTimer();
         this._log('started');
         defer.resolve();
@@ -153,6 +147,7 @@ ArcamSa20Plugin.prototype.onStart = function() {
 };
 
 ArcamSa20Plugin.prototype.onStop = function() {
+  this._clearStartupRetryTimers();
   this._cancelIdlePowerOffTimer();
   this._stopLiveStatusTimer();
   this._destroyAmpSocket(true);
@@ -166,6 +161,23 @@ ArcamSa20Plugin.prototype.onStop = function() {
     this.socket = null;
   }
   return this.resetVolumeSettings();
+};
+
+ArcamSa20Plugin.prototype._scheduleStartupRetryTimers = function() {
+  this._clearStartupRetryTimers();
+  [4000, 12000, 25000].forEach((delayMs) => {
+    const timer = setTimeout(() => {
+      this.initVolumeSettings().fail(() => libQ.resolve());
+    }, delayMs);
+    this.startupRetryTimers.push(timer);
+  });
+};
+
+ArcamSa20Plugin.prototype._clearStartupRetryTimers = function() {
+  (this.startupRetryTimers || []).forEach((timer) => {
+    clearTimeout(timer);
+  });
+  this.startupRetryTimers = [];
 };
 
 ArcamSa20Plugin.prototype.onRestart = function() {

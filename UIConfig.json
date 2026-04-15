@@ -240,7 +240,7 @@
           "id": "resetDefaultPreset",
           "element": "button",
           "label": "Reset to default preset",
-          "description": "Reload the stored default preset for this plugin.",
+          "description": "Reload the stored default preset for the full plugin configuration, including TCP connection settings and playback defaults.",
           "onClick": {
             "type": "emit",
             "message": "callMethod",
