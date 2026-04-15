@@ -289,6 +289,14 @@ ArcamSa20Plugin.prototype.resetDefaultPreset = function() {
     });
 };
 
+ArcamSa20Plugin.prototype.setDefaultPreset = function() {
+  const preset = this._captureCurrentPreset();
+  conf.set('defaultPresetJson', JSON.stringify(preset));
+  conf.set('defaultPresetInitialized', true);
+  this._toast('success', 'ARCAM SA20', 'Current values stored as default preset');
+  return libQ.resolve();
+};
+
 ArcamSa20Plugin.prototype.setManualSource = function(data) {
   const source = this._normalizeSourceSelection(this._readUiValue(data, ['source', 'manualSource']), conf.get('manualSource') || conf.get('playSource') || 'CD');
   const balanceValue = this._readUiValue(data, ['manualBalanceValue', 'manualBalance']);
@@ -348,7 +356,7 @@ ArcamSa20Plugin.prototype._ensureConfiguredHost = function() {
 
 ArcamSa20Plugin.prototype._discoverSa20HostInternal = function(options) {
   const settings = options || {};
-  const port = this._clampInt(conf.get('port'), 1, 65535, 50000);
+  const ports = this._getDiscoveryPorts();
   const timeoutMs = this._clampInt(conf.get('timeoutMs'), 500, 20000, 3000);
   const scanTimeoutMs = this._clampInt(Math.min(timeoutMs, 1200), 200, 5000, 700);
   const targets = this._getDiscoveryTargets();
@@ -362,29 +370,36 @@ ArcamSa20Plugin.prototype._discoverSa20HostInternal = function(options) {
   }
 
   this._destroyAmpSocket(true);
-  this._log('starting SA20 discovery on ' + targets.length + ' candidate hosts');
+  this._log('starting SA20 discovery on ' + targets.length + ' candidate hosts and ports ' + ports.join(', '));
 
-  return this._scanHostsForSa20(targets, port, scanTimeoutMs)
-    .then((host) => {
-      if (!host) {
-        throw new Error('no SA20 responding on TCP port ' + port);
+  return this._scanHostsForSa20(targets, ports, scanTimeoutMs)
+    .then((match) => {
+      if (!match) {
+        throw new Error('no SA20 responding on TCP ports ' + ports.join(', '));
       }
-      conf.set('host', host);
+      conf.set('host', match.host);
+      conf.set('port', match.port);
       this.unsupportedStatusQueries = {
         power: false,
         volume: false,
         balance: false,
         mute: false
       };
+      this.statusQueryRetryAt = {
+        power: 0,
+        volume: 0,
+        balance: 0,
+        mute: 0
+      };
       if (!settings.silent) {
-        this._toast('success', 'ARCAM SA20', 'Discovered amplifier at ' + host);
+        this._toast('success', 'ARCAM SA20', 'Discovered amplifier at ' + match.host + ':' + match.port);
       }
       if (settings.pushUiRefresh) {
         return this._pushUiConfigRefresh()
           .fail(() => libQ.resolve())
-          .then(() => host);
+          .then(() => match.host);
       }
-      return host;
+      return match.host;
     })
     .fail((err) => {
       if (!settings.silent) {
@@ -392,6 +407,15 @@ ArcamSa20Plugin.prototype._discoverSa20HostInternal = function(options) {
       }
       throw err;
     });
+};
+
+ArcamSa20Plugin.prototype._getDiscoveryPorts = function() {
+  const configuredPort = this._clampInt(conf.get('port'), 1, 65535, 50000);
+  const ports = [50000];
+  if (configuredPort !== 50000) {
+    ports.push(configuredPort);
+  }
+  return ports;
 };
 
 ArcamSa20Plugin.prototype._getDiscoveryTargets = function() {
@@ -429,35 +453,44 @@ ArcamSa20Plugin.prototype._getDiscoveryTargets = function() {
   return targets;
 };
 
-ArcamSa20Plugin.prototype._scanHostsForSa20 = function(targets, port, timeoutMs) {
+ArcamSa20Plugin.prototype._scanHostsForSa20 = function(targets, ports, timeoutMs) {
   const defer = libQ.defer();
-  const maxConcurrent = this._clampInt(Math.min(24, Math.max(4, targets.length)), 1, 64, 16);
+  const jobs = [];
+  (ports || []).forEach((port) => {
+    targets.forEach((host) => {
+      jobs.push({ host: host, port: port });
+    });
+  });
+  const maxConcurrent = this._clampInt(Math.min(24, Math.max(4, jobs.length)), 1, 64, 16);
   let cursor = 0;
   let active = 0;
   let finished = false;
-  let foundHost = null;
+  let foundMatch = null;
 
   const maybeFinish = () => {
     if (finished) {
       return;
     }
-    if (foundHost) {
+    if (foundMatch) {
       finished = true;
-      defer.resolve(foundHost);
+      defer.resolve(foundMatch);
       return;
     }
-    if (cursor >= targets.length && active === 0) {
+    if (cursor >= jobs.length && active === 0) {
       finished = true;
       defer.resolve(null);
       return;
     }
-    while (active < maxConcurrent && cursor < targets.length && !finished) {
-      const host = targets[cursor++];
+    while (active < maxConcurrent && cursor < jobs.length && !finished) {
+      const job = jobs[cursor++];
       active += 1;
-      this._probeSa20Host(host, port, timeoutMs)
+      this._probeSa20Host(job.host, job.port, timeoutMs)
         .then((matchedHost) => {
-          if (matchedHost && !foundHost) {
-            foundHost = matchedHost;
+          if (matchedHost && !foundMatch) {
+            foundMatch = {
+              host: matchedHost,
+              port: job.port
+            };
           }
         })
         .fail(() => libQ.resolve())
@@ -1932,11 +1965,7 @@ ArcamSa20Plugin.prototype._readDefaultPreset = function() {
   return defaults;
 };
 
-ArcamSa20Plugin.prototype._ensureDefaultPresetStored = function() {
-  if (conf.get('defaultPresetInitialized') && String(conf.get('defaultPresetJson') || '').trim()) {
-    return;
-  }
-
+ArcamSa20Plugin.prototype._captureCurrentPreset = function() {
   const preset = {};
   [
     'host',
@@ -1957,7 +1986,15 @@ ArcamSa20Plugin.prototype._ensureDefaultPresetStored = function() {
   ].forEach((key) => {
     preset[key] = conf.get(key);
   });
+  return preset;
+};
 
+ArcamSa20Plugin.prototype._ensureDefaultPresetStored = function() {
+  if (conf.get('defaultPresetInitialized') && String(conf.get('defaultPresetJson') || '').trim()) {
+    return;
+  }
+
+  const preset = this._captureCurrentPreset();
   conf.set('defaultPresetJson', JSON.stringify(preset));
   conf.set('defaultPresetInitialized', true);
 };

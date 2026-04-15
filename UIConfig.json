@@ -220,13 +220,28 @@
           "id": "resetDefaultPreset",
           "element": "button",
           "label": "Reset to default preset",
-          "description": "Reload the install defaults from the plugin preset in config.json.",
+          "description": "Reload the stored default preset for this plugin.",
           "onClick": {
             "type": "emit",
             "message": "callMethod",
             "data": {
               "endpoint": "system_hardware/arcam_sa20",
               "method": "resetDefaultPreset",
+              "data": ""
+            }
+          }
+        },
+        {
+          "id": "setDefaultPreset",
+          "element": "button",
+          "label": "Set current values as default preset",
+          "description": "Store the current plugin configuration as the default preset for future resets.",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "setDefaultPreset",
               "data": ""
             }
           }
@@ -276,7 +291,7 @@
           "element": "input",
           "type": "number",
           "label": "TCP port",
-          "doc": "Arcam network control port",
+          "doc": "Recommended SA20 TCP control port: 50000. Discovery tries port 50000 first, then the configured port if it differs.",
           "value": 50000
         },
         {
