@@ -29,6 +29,24 @@ const SOURCE_NAMES = {
   0x07: 'BD',
   0x08: 'SAT'
 };
+const DAC_FILTER_CODES = {
+  'Linear Phase Fast Roll Off': 0x00,
+  'Linear Phase Slow Roll Off': 0x01,
+  'Minimum Phase Fast Roll Off': 0x02,
+  'Minimum Phase Slow Roll Off': 0x03,
+  'Brick Wall': 0x04,
+  'Corrected Phase Fast Roll Off': 0x05,
+  'Apodizing': 0x06
+};
+const DAC_FILTER_NAMES = {
+  0x00: 'Linear Phase Fast Roll Off',
+  0x01: 'Linear Phase Slow Roll Off',
+  0x02: 'Minimum Phase Fast Roll Off',
+  0x03: 'Minimum Phase Slow Roll Off',
+  0x04: 'Brick Wall',
+  0x05: 'Corrected Phase Fast Roll Off',
+  0x06: 'Apodizing'
+};
 const AMP_IO_PRIORITY = {
   LOW: 10,
   NORMAL: 50,
@@ -171,6 +189,7 @@ ArcamSa20Plugin.prototype.getUIConfig = function() {
     this._setUIValue(uiconf, 'playSource', conf.get('playSource'));
     this._setUIValue(uiconf, 'setVolumeOnPlay', conf.get('setVolumeOnPlay'));
     this._setUIValue(uiconf, 'playVolumeValue', conf.get('playVolume'));
+    this._setUIValue(uiconf, 'dacFilterValue', this._normalizeDacFilterSelection(conf.get('lastDacFilter'), conf.get('dacFilter') || 'Apodizing'));
     this._setUIValue(uiconf, 'powerOnDelayMs', conf.get('powerOnDelayMs'));
     this._setUIValue(uiconf, 'autoPowerOffOnIdle', conf.get('autoPowerOffOnIdle'));
     this._setUIValue(uiconf, 'stopPlaybackWhenAmpUnavailable', !!conf.get('stopPlaybackWhenAmpUnavailable'));
@@ -210,11 +229,15 @@ ArcamSa20Plugin.prototype.saveConnectionConfig = function(data) {
 };
 
 ArcamSa20Plugin.prototype.saveBehaviorConfig = function(data) {
+  const requestedDacFilter = this._normalizeDacFilterSelection(data.dacFilterValue, conf.get('dacFilter') || 'Apodizing');
+  const previousDacFilter = this._normalizeDacFilterSelection(conf.get('dacFilter'), 'Apodizing');
+
   conf.set('autoPowerOnPlay', !!data.autoPowerOnPlay);
   conf.set('switchSourceOnPlay', !!data.switchSourceOnPlay);
   conf.set('playSource', this._normalizeSourceSelection(data.playSource, conf.get('playSource') || 'CD'));
   conf.set('setVolumeOnPlay', !!data.setVolumeOnPlay);
   conf.set('playVolume', this._readClampedUiInt(data, ['playVolumeValue', 'playVolumeSlider', 'playVolume'], 0, 99, 30));
+  conf.set('dacFilter', requestedDacFilter);
   conf.set('powerOnDelayMs', this._clampInt(data.powerOnDelayMs, 0, 15000, 3500));
   conf.set('autoPowerOffOnIdle', !!data.autoPowerOffOnIdle);
   conf.set('stopPlaybackWhenAmpUnavailable', !!data.stopPlaybackWhenAmpUnavailable);
@@ -226,8 +249,20 @@ ArcamSa20Plugin.prototype.saveBehaviorConfig = function(data) {
   setTimeout(() => {
     this.initVolumeSettings().fail(() => libQ.resolve());
   }, 500);
-  this._toast('success', 'ARCAM SA20', 'Playback automation settings saved');
-  return libQ.resolve();
+  return libQ.resolve()
+    .then(() => {
+      if (requestedDacFilter === previousDacFilter) {
+        return libQ.resolve();
+      }
+      return this._setDacFilter(requestedDacFilter)
+        .then(() => this.queryStatusSilent().fail(() => libQ.resolve()));
+    })
+    .then(() => {
+      this._toast('success', 'ARCAM SA20', 'Playback automation settings saved');
+    })
+    .fail((err) => {
+      this._toast('warning', 'ARCAM SA20', 'Playback settings saved, but DAC filter update failed: ' + err.message);
+    });
 };
 
 ArcamSa20Plugin.prototype.resetDefaultPreset = function() {
@@ -242,6 +277,7 @@ ArcamSa20Plugin.prototype.resetDefaultPreset = function() {
     'manualSource',
     'setVolumeOnPlay',
     'playVolume',
+    'dacFilter',
     'manualBalance',
     'powerOnDelayMs',
     'debugLogging',
@@ -260,6 +296,7 @@ ArcamSa20Plugin.prototype.resetDefaultPreset = function() {
   conf.set('lastSource', 'Unknown');
   conf.set('lastMute', 'Unknown');
   conf.set('lastBalance', String(Object.prototype.hasOwnProperty.call(defaults, 'manualBalance') ? defaults.manualBalance : 0));
+  conf.set('lastDacFilter', 'Unknown');
   this.cachedVolume = this._clampInt(defaults.playVolume, 0, 99, 30);
   this.cachedMute = false;
   this.unsupportedStatusQueries = {
@@ -1305,18 +1342,31 @@ ArcamSa20Plugin.prototype._startLiveStatusTimer = function() {
 ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull) {
   const includeExtended = !!forceFull || (this.liveStatusSequence % STATUS_POLL_EXTENDED_EVERY) === 0;
   this.liveStatusSequence += 1;
-  const steps = [
-    () => this._querySource(),
-    () => this._queryMute()
-  ];
+  const runLegacyStatusSequence = () => {
+    const steps = [
+      () => this._querySource(),
+      () => this._queryMute()
+    ];
 
-  if (includeExtended) {
-    steps.push(() => this._queryPower());
-    steps.push(() => this._queryVolume());
-    steps.push(() => this._queryBalance());
-  }
+    if (includeExtended) {
+      steps.push(() => this._queryPower());
+      steps.push(() => this._queryVolume());
+      steps.push(() => this._queryBalance());
+      steps.push(() => this._queryDacFilter());
+    }
 
-  return this._runSeries(steps).then(() => {
+    return this._runSeries(steps);
+  };
+
+  const statusPromise = includeExtended ?
+    this._querySystemStatus()
+      .fail((err) => {
+        this._log('system status query failed; falling back to individual queries: ' + err.message);
+        return runLegacyStatusSequence();
+      }) :
+    runLegacyStatusSequence();
+
+  return statusPromise.then(() => {
     const now = new Date();
     const ts = now.getFullYear() + '-' +
       String(now.getMonth() + 1).padStart(2, '0') + '-' +
@@ -1438,6 +1488,122 @@ ArcamSa20Plugin.prototype._queryBalance = function() {
     }
     return libQ.reject(err);
   });
+};
+
+ArcamSa20Plugin.prototype._queryDacFilter = function() {
+  return this._sendStatusQuery(0x61, [0xF0], AMP_IO_PRIORITY.LOW).then((resp) => {
+    if (resp.answerCode !== 0x00) {
+      conf.set('lastDacFilter', 'Unknown');
+      return 'Unknown';
+    }
+    const parsed = this._parseDacFilter(resp);
+    conf.set('lastDacFilter', parsed);
+    conf.set('dacFilter', parsed);
+    return parsed;
+  }).fail((err) => {
+    if (this._isTimeoutError(err)) {
+      this._log('DAC filter query timed out; keeping last confirmed DAC filter');
+      return conf.get('lastDacFilter') || 'Unknown';
+    }
+    return libQ.reject(err);
+  });
+};
+
+ArcamSa20Plugin.prototype._querySystemStatus = function() {
+  return this._queueAmpIo(() => this._querySystemStatusRaw(), AMP_IO_PRIORITY.LOW)
+    .then((frames) => this._applySystemStatusFrames(frames));
+};
+
+ArcamSa20Plugin.prototype._querySystemStatusRaw = function() {
+  const frames = [];
+  return this._runAmpSocketCommand(0x5D, [0xF0], {
+    expectResponse: true,
+    allowNonZeroAnswer: true,
+    onFrame: (resp, commandState) => {
+      frames.push(resp);
+      if (resp.command !== 0x5D) {
+        return;
+      }
+      if (resp.answerCode !== 0x00) {
+        commandState.reject(new Error('system status returned answer code 0x' + ('0' + resp.answerCode.toString(16)).slice(-2)));
+        return;
+      }
+      commandState.resolve(frames.slice(0));
+    }
+  });
+};
+
+ArcamSa20Plugin.prototype._applySystemStatusFrames = function(frames) {
+  const responses = Array.isArray(frames) ? frames : [];
+  let recognized = 0;
+
+  responses.forEach((resp) => {
+    if (!resp || typeof resp.command !== 'number') {
+      return;
+    }
+    switch (resp.command) {
+      case 0x00:
+        conf.set('lastPower', resp.answerCode === 0x00 ? this._parsePower(resp) : 'Unknown');
+        this._clearStatusQuerySuppression('power');
+        recognized += 1;
+        break;
+      case 0x0D:
+        if (resp.answerCode === 0x00) {
+          const parsedVolume = this._parseVolume(resp);
+          conf.set('lastVolume', parsedVolume);
+          this.cachedVolume = this._clampInt(parsedVolume, 0, 99, this.cachedVolume);
+        } else {
+          conf.set('lastVolume', 'Unknown');
+        }
+        this._clearStatusQuerySuppression('volume');
+        recognized += 1;
+        break;
+      case 0x0E:
+        if (resp.answerCode === 0x00) {
+          const parsedMute = this._parseMute(resp);
+          conf.set('lastMute', parsedMute);
+          this.cachedMute = parsedMute === 'Muted';
+        } else {
+          conf.set('lastMute', 'Unknown');
+        }
+        this._clearStatusQuerySuppression('mute');
+        recognized += 1;
+        break;
+      case 0x1D:
+        conf.set('lastSource', resp.answerCode === 0x00 ? this._parseSource(resp) : 'Unknown');
+        recognized += 1;
+        break;
+      case 0x3B:
+        if (resp.answerCode === 0x00) {
+          const parsedBalance = this._parseBalance(resp);
+          conf.set('lastBalance', parsedBalance);
+          conf.set('manualBalance', this._balanceStringToInt(parsedBalance));
+        } else {
+          conf.set('lastBalance', 'Unknown');
+        }
+        this._clearStatusQuerySuppression('balance');
+        recognized += 1;
+        break;
+      case 0x61:
+        if (resp.answerCode === 0x00) {
+          const parsedDacFilter = this._parseDacFilter(resp);
+          conf.set('lastDacFilter', parsedDacFilter);
+          conf.set('dacFilter', parsedDacFilter);
+        } else {
+          conf.set('lastDacFilter', 'Unknown');
+        }
+        recognized += 1;
+        break;
+      default:
+        break;
+    }
+  });
+
+  if (!recognized) {
+    return libQ.reject(new Error('system status returned no recognized status frames'));
+  }
+
+  return libQ.resolve(responses);
 };
 
 ArcamSa20Plugin.prototype._queueAmpIo = function(task, priority) {
@@ -1621,21 +1787,28 @@ ArcamSa20Plugin.prototype._handleAmpSocketData = function(chunk) {
   }
 
   this.ampSocketBuffer = this.ampSocketBuffer.length ? Buffer.concat([this.ampSocketBuffer, chunk]) : Buffer.from(chunk);
-  const frame = this._tryExtractAmpResponseFrame();
-  if (!frame) {
-    return;
-  }
-
-  const currentCommand = this.ampSocketCommand;
-  try {
-    const resp = this._parseResponse(frame);
-    if (resp.answerCode !== 0x00 && !currentCommand.allowNonZeroAnswer) {
-      throw new Error('amplifier returned answer code 0x' + ('0' + resp.answerCode.toString(16)).slice(-2));
+  while (this.ampSocketCommand && this.ampSocketCommand.expectResponse) {
+    const frame = this._tryExtractAmpResponseFrame();
+    if (!frame) {
+      return;
     }
-    currentCommand.resolve(resp);
-  } catch (e) {
-    currentCommand.reject(e);
-    this._destroyAmpSocket(true);
+
+    const currentCommand = this.ampSocketCommand;
+    try {
+      const resp = this._parseResponse(frame);
+      if (currentCommand.onFrame) {
+        currentCommand.onFrame(resp, currentCommand);
+        continue;
+      }
+      if (resp.answerCode !== 0x00 && !currentCommand.allowNonZeroAnswer) {
+        throw new Error('amplifier returned answer code 0x' + ('0' + resp.answerCode.toString(16)).slice(-2));
+      }
+      currentCommand.resolve(resp);
+    } catch (e) {
+      currentCommand.reject(e);
+      this._destroyAmpSocket(true);
+      return;
+    }
   }
 };
 
@@ -1733,6 +1906,7 @@ ArcamSa20Plugin.prototype._runAmpSocketCommand = function(command, dataBytes, op
   const expectResponse = !!settings.expectResponse;
   const allowNonZeroAnswer = !!settings.allowNonZeroAnswer;
   const postWriteDelayMs = this._clampInt(settings.postWriteDelayMs, 0, 1000, 0);
+  const onFrame = typeof settings.onFrame === 'function' ? settings.onFrame : null;
   const timeoutMs = this._clampInt(conf.get('timeoutMs'), 500, 20000, 3000);
   const payload = Buffer.from([0x21, 0x01, command, dataBytes.length].concat(dataBytes).concat([0x0D]));
 
@@ -1742,6 +1916,7 @@ ArcamSa20Plugin.prototype._runAmpSocketCommand = function(command, dataBytes, op
     const commandState = {
       expectResponse: expectResponse,
       allowNonZeroAnswer: allowNonZeroAnswer,
+      onFrame: onFrame,
       timer: null,
       resolve: (value) => {
         if (settled) {
@@ -1918,6 +2093,11 @@ ArcamSa20Plugin.prototype._parseBalance = function(resp) {
   return 'Unknown';
 };
 
+ArcamSa20Plugin.prototype._parseDacFilter = function(resp) {
+  if (!resp.data.length) return 'Unknown';
+  return DAC_FILTER_NAMES[resp.data[0]] || 'Unknown';
+};
+
 ArcamSa20Plugin.prototype._encodeBalance = function(value) {
   if (value === 0) return 0x00;
   if (value > 0) return value;
@@ -1941,6 +2121,28 @@ ArcamSa20Plugin.prototype._normalizeSourceSelection = function(value, fallback) 
   }
   const candidate = String(value || fallback || 'CD');
   return Object.prototype.hasOwnProperty.call(SOURCE_CODES, candidate) ? candidate : fallback;
+};
+
+ArcamSa20Plugin.prototype._normalizeDacFilterSelection = function(value, fallback) {
+  if (value && typeof value === 'object' && value.value) {
+    value = value.value;
+  }
+  if (value && typeof value === 'object' && value.label) {
+    value = value.label;
+  }
+  const fallbackName = Object.prototype.hasOwnProperty.call(DAC_FILTER_CODES, fallback) ? fallback : 'Apodizing';
+  const candidate = String(value || fallbackName);
+  return Object.prototype.hasOwnProperty.call(DAC_FILTER_CODES, candidate) ? candidate : fallbackName;
+};
+
+ArcamSa20Plugin.prototype._setDacFilter = function(filterName) {
+  const normalized = this._normalizeDacFilterSelection(filterName, conf.get('dacFilter') || 'Apodizing');
+  const code = DAC_FILTER_CODES[normalized];
+  if (typeof code !== 'number') {
+    return libQ.reject(new Error('invalid DAC filter'));
+  }
+  return this._sendCommandBestEffort(0x61, [code], 'DAC filter', AMP_IO_PRIORITY.NORMAL)
+    .then(() => normalized);
 };
 
 ArcamSa20Plugin.prototype._readDefaultPreset = function() {
@@ -1977,6 +2179,7 @@ ArcamSa20Plugin.prototype._captureCurrentPreset = function() {
     'manualSource',
     'setVolumeOnPlay',
     'playVolume',
+    'dacFilter',
     'manualBalance',
     'powerOnDelayMs',
     'debugLogging',

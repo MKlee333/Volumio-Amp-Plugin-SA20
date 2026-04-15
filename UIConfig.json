@@ -123,6 +123,7 @@
           "playSource",
           "setVolumeOnPlay",
           "playVolumeValue",
+          "dacFilterValue",
           "powerOnDelayMs",
           "debugLogging",
           "autoPowerOffOnIdle",
@@ -179,6 +180,25 @@
           "max": 99,
           "step": 1,
           "value": 30
+        },
+        {
+          "id": "dacFilterValue",
+          "element": "select",
+          "label": "DAC filter",
+          "doc": "Saved to the plugin config and applied directly on the SA20. The extended system status refresh also reads back the confirmed filter.",
+          "value": {
+            "value": "Apodizing",
+            "label": "Apodizing"
+          },
+          "options": [
+            { "value": "Linear Phase Fast Roll Off", "label": "Linear Phase Fast Roll Off" },
+            { "value": "Linear Phase Slow Roll Off", "label": "Linear Phase Slow Roll Off" },
+            { "value": "Minimum Phase Fast Roll Off", "label": "Minimum Phase Fast Roll Off" },
+            { "value": "Minimum Phase Slow Roll Off", "label": "Minimum Phase Slow Roll Off" },
+            { "value": "Brick Wall", "label": "Brick Wall" },
+            { "value": "Corrected Phase Fast Roll Off", "label": "Corrected Phase Fast Roll Off" },
+            { "value": "Apodizing", "label": "Apodizing" }
+          ]
         },
         {
           "id": "powerOnDelayMs",

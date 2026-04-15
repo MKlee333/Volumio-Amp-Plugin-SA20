@@ -35,6 +35,10 @@
     "type": "boolean",
     "value": true
   },
+  "dacFilter": {
+    "type": "string",
+    "value": "Apodizing"
+  },
   "playVolume": {
     "type": "number",
     "value": 30
@@ -70,6 +74,10 @@
   "lastBalance": {
     "type": "string",
     "value": "0"
+  },
+  "lastDacFilter": {
+    "type": "string",
+    "value": "Unknown"
   },
   "manualBalance": {
     "type": "number",
