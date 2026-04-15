@@ -667,13 +667,14 @@ ArcamSa20Plugin.prototype._applyManualState = function(options) {
   this._stopLiveStatusTimer();
 
   if (typeof sourceCode === 'number') {
-    steps.push(() => this._sendCommandBestEffort(0x1D, [sourceCode], 'manual source', AMP_IO_PRIORITY.NORMAL).then(() => this._delay(300)));
+    steps.push(() => this._sendCommandNoAck(0x1D, [sourceCode], AMP_IO_PRIORITY.NORMAL).then(() => this._delay(300)));
   }
   if (volume !== null) {
-    steps.push(() => this._sendCommandBestEffort(0x0D, [volume], 'manual volume', AMP_IO_PRIORITY.NORMAL));
+    steps.push(() => this._sendCommandNoAck(0x0D, [volume], AMP_IO_PRIORITY.NORMAL).then(() => this._delay(150)));
   }
   if (balance !== null) {
-    steps.push(() => this._sendCommandBestEffort(0x3B, [this._encodeBalance(balance)], 'manual balance', AMP_IO_PRIORITY.NORMAL));
+    steps.push(() => this._sendCommandNoAck(0x3B, [this._encodeBalance(balance)], AMP_IO_PRIORITY.NORMAL)
+      .then(() => this._delay(150)));
   }
 
   return this._runSeries(steps)
@@ -1067,12 +1068,13 @@ ArcamSa20Plugin.prototype._setPlaybackSource = function() {
   if (typeof code !== 'number') {
     return libQ.reject(new Error('invalid playback source'));
   }
-  return this._sendCommand(0x1D, [code], AMP_IO_PRIORITY.HIGH).then(() => this._delay(150));
+  return this._sendCommandNoAck(0x1D, [code], AMP_IO_PRIORITY.HIGH).then(() => this._delay(150));
 };
 
 ArcamSa20Plugin.prototype._setPlaybackVolume = function() {
   const volume = this._clampInt(conf.get('playVolume'), 0, 99, 30);
-  return this._sendCommand(0x0D, [volume], AMP_IO_PRIORITY.HIGH)
+  return this._sendCommandNoAck(0x0D, [volume], AMP_IO_PRIORITY.HIGH)
+    .then(() => this._delay(150))
     .then(() => {
       this.cachedVolume = volume;
       conf.set('lastVolume', String(volume));
@@ -1646,29 +1648,6 @@ ArcamSa20Plugin.prototype._pumpAmpIoQueue = function() {
     });
 };
 
-ArcamSa20Plugin.prototype._sendCommandBestEffort = function(command, dataBytes, label, priority) {
-  return this._sendCommand(command, dataBytes, priority).fail((err) => {
-    if (!this._isTimeoutError(err)) {
-      return libQ.reject(err);
-    }
-    this._log((label || 'command') + ' timed out after write; retrying without ACK');
-    return this._sendCommandNoAck(command, dataBytes, priority).fail((fallbackErr) => {
-      if (!this._isTimeoutError(fallbackErr)) {
-        return libQ.reject(fallbackErr);
-      }
-      this._log((label || 'command') + ' also timed out without ACK; continuing');
-      return libQ.resolve({
-        zone: 0x01,
-        command: command,
-        answerCode: 0x00,
-        declaredLength: dataBytes.length,
-        data: dataBytes.slice(0),
-        rawHex: ''
-      });
-    });
-  });
-};
-
 ArcamSa20Plugin.prototype._isMutedCached = function() {
   return this.cachedMute || conf.get('lastMute') === 'Muted';
 };
@@ -2141,7 +2120,8 @@ ArcamSa20Plugin.prototype._setDacFilter = function(filterName) {
   if (typeof code !== 'number') {
     return libQ.reject(new Error('invalid DAC filter'));
   }
-  return this._sendCommandBestEffort(0x61, [code], 'DAC filter', AMP_IO_PRIORITY.NORMAL)
+  return this._sendCommandNoAck(0x61, [code], AMP_IO_PRIORITY.NORMAL)
+    .then(() => this._delay(150))
     .then(() => normalized);
 };
 
