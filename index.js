@@ -3,6 +3,7 @@
 const libQ = require('kew');
 const path = require('path');
 const net = require('net');
+const os = require('os');
 const io = require('socket.io-client');
 const conf = new (require('v-conf'))();
 
@@ -89,7 +90,9 @@ ArcamSa20Plugin.prototype.onStart = function() {
     this.cachedVolume = this._clampInt(conf.get('lastVolume'), 0, 99, this._clampInt(conf.get('playVolume'), 0, 99, 30));
     this.cachedMute = conf.get('lastMute') === 'Muted';
     this._activateSocketIO();
-    this.initVolumeSettings()
+    this._ensureConfiguredHost()
+      .fail(() => libQ.resolve())
+      .then(() => this.initVolumeSettings())
       .then(() => this.queryStatusSilent())
       .then(() => {
         setTimeout(() => {
@@ -171,14 +174,22 @@ ArcamSa20Plugin.prototype.getUIConfig = function() {
 };
 
 ArcamSa20Plugin.prototype.saveConnectionConfig = function(data) {
-  conf.set('host', String(data.host || '').trim());
+  const manualHost = String(data.host || '').trim();
+  conf.set('host', manualHost);
   conf.set('port', this._clampInt(data.port, 1, 65535, 50000));
   conf.set('timeoutMs', this._clampInt(data.timeoutMs, 500, 20000, 3000));
+  this._destroyAmpSocket(true);
   setTimeout(() => {
     this.initVolumeSettings().fail(() => libQ.resolve());
   }, 500);
-  this._toast('success', 'ARCAM SA20', 'Connection settings saved');
-  return libQ.resolve();
+  if (manualHost) {
+    this._toast('success', 'ARCAM SA20', 'Connection settings saved');
+    return libQ.resolve();
+  }
+  return this._discoverSa20HostInternal({
+    silent: false,
+    pushUiRefresh: true
+  });
 };
 
 ArcamSa20Plugin.prototype.saveBehaviorConfig = function(data) {
@@ -203,14 +214,216 @@ ArcamSa20Plugin.prototype.saveBehaviorConfig = function(data) {
 };
 
 ArcamSa20Plugin.prototype.testConnection = function() {
-  return this._connectOnly()
+  return this._ensureConfiguredHost()
+    .then(() => this._connectOnly())
     .then(() => {
-      this._toast('success', 'ARCAM SA20', 'TCP connection successful');
+      this._toast('success', 'ARCAM SA20', 'TCP connection successful to ' + conf.get('host'));
     })
     .fail((err) => {
       this._toast('error', 'ARCAM SA20', 'TCP connection failed: ' + err.message);
       throw err;
     });
+};
+
+ArcamSa20Plugin.prototype.discoverSa20Host = function() {
+  return this._discoverSa20HostInternal({
+    silent: false,
+    pushUiRefresh: true
+  });
+};
+
+ArcamSa20Plugin.prototype._ensureConfiguredHost = function() {
+  if (String(conf.get('host') || '').trim()) {
+    return libQ.resolve(conf.get('host'));
+  }
+  return this._discoverSa20HostInternal({
+    silent: true,
+    pushUiRefresh: false
+  });
+};
+
+ArcamSa20Plugin.prototype._discoverSa20HostInternal = function(options) {
+  const settings = options || {};
+  const port = this._clampInt(conf.get('port'), 1, 65535, 50000);
+  const timeoutMs = this._clampInt(conf.get('timeoutMs'), 500, 20000, 3000);
+  const scanTimeoutMs = this._clampInt(Math.min(timeoutMs, 1200), 200, 5000, 700);
+  const targets = this._getDiscoveryTargets();
+
+  if (!targets.length) {
+    const err = new Error('no local IPv4 subnet found for discovery');
+    if (!settings.silent) {
+      this._toast('error', 'ARCAM SA20', 'Automatic discovery failed: ' + err.message);
+    }
+    return libQ.reject(err);
+  }
+
+  this._destroyAmpSocket(true);
+  this._log('starting SA20 discovery on ' + targets.length + ' candidate hosts');
+
+  return this._scanHostsForSa20(targets, port, scanTimeoutMs)
+    .then((host) => {
+      if (!host) {
+        throw new Error('no SA20 responding on TCP port ' + port);
+      }
+      conf.set('host', host);
+      this.unsupportedStatusQueries = {
+        power: false,
+        volume: false,
+        balance: false,
+        mute: false
+      };
+      if (!settings.silent) {
+        this._toast('success', 'ARCAM SA20', 'Discovered amplifier at ' + host);
+      }
+      if (settings.pushUiRefresh) {
+        return this._pushUiConfigRefresh()
+          .fail(() => libQ.resolve())
+          .then(() => host);
+      }
+      return host;
+    })
+    .fail((err) => {
+      if (!settings.silent) {
+        this._toast('error', 'ARCAM SA20', 'Automatic discovery failed: ' + err.message);
+      }
+      throw err;
+    });
+};
+
+ArcamSa20Plugin.prototype._getDiscoveryTargets = function() {
+  const interfaces = os.networkInterfaces ? os.networkInterfaces() : {};
+  const seen = {};
+  const targets = [];
+
+  Object.keys(interfaces || {}).forEach((name) => {
+    (interfaces[name] || []).forEach((entry) => {
+      if (!entry || entry.internal || entry.family !== 'IPv4') {
+        return;
+      }
+      const address = String(entry.address || '').trim();
+      const parts = address.split('.');
+      if (parts.length !== 4) {
+        return;
+      }
+      const prefix = parts.slice(0, 3).join('.');
+      for (let i = 1; i <= 254; i++) {
+        const host = prefix + '.' + i;
+        if (host === address || seen[host]) {
+          continue;
+        }
+        seen[host] = true;
+        targets.push(host);
+      }
+    });
+  });
+
+  const configuredHost = String(conf.get('host') || '').trim();
+  if (configuredHost && !seen[configuredHost]) {
+    targets.unshift(configuredHost);
+  }
+
+  return targets;
+};
+
+ArcamSa20Plugin.prototype._scanHostsForSa20 = function(targets, port, timeoutMs) {
+  const defer = libQ.defer();
+  const maxConcurrent = this._clampInt(Math.min(24, Math.max(4, targets.length)), 1, 64, 16);
+  let cursor = 0;
+  let active = 0;
+  let finished = false;
+  let foundHost = null;
+
+  const maybeFinish = () => {
+    if (finished) {
+      return;
+    }
+    if (foundHost) {
+      finished = true;
+      defer.resolve(foundHost);
+      return;
+    }
+    if (cursor >= targets.length && active === 0) {
+      finished = true;
+      defer.resolve(null);
+      return;
+    }
+    while (active < maxConcurrent && cursor < targets.length && !finished) {
+      const host = targets[cursor++];
+      active += 1;
+      this._probeSa20Host(host, port, timeoutMs)
+        .then((matchedHost) => {
+          if (matchedHost && !foundHost) {
+            foundHost = matchedHost;
+          }
+        })
+        .fail(() => libQ.resolve())
+        .fin(() => {
+          active -= 1;
+          maybeFinish();
+        });
+    }
+  };
+
+  maybeFinish();
+  return defer.promise;
+};
+
+ArcamSa20Plugin.prototype._probeSa20Host = function(host, port, timeoutMs) {
+  const defer = libQ.defer();
+  const socket = net.createConnection({ host: host, port: port });
+  const payload = Buffer.from([0x21, 0x01, 0x00, 0x01, 0xF0, 0x0D]);
+  let buffer = Buffer.alloc(0);
+  let connected = false;
+  let settled = false;
+
+  const finish = (matched) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    try {
+      socket.destroy();
+    } catch (e) {
+      // ignore
+    }
+    defer.resolve(matched ? host : null);
+  };
+
+  socket.setNoDelay(true);
+  socket.setTimeout(timeoutMs);
+
+  socket.on('connect', () => {
+    connected = true;
+    socket.write(payload, (err) => {
+      if (err) {
+        finish(false);
+      }
+    });
+  });
+
+  socket.on('data', (chunk) => {
+    if (settled) {
+      return;
+    }
+    buffer = buffer.length ? Buffer.concat([buffer, chunk]) : Buffer.from(chunk);
+    const extracted = this._extractAmpResponseFrameFromBuffer(buffer);
+    buffer = extracted.rest;
+    if (!extracted.frame) {
+      return;
+    }
+    try {
+      const resp = this._parseResponse(extracted.frame);
+      finish(resp.zone === 0x01);
+    } catch (e) {
+      finish(false);
+    }
+  });
+
+  socket.on('timeout', () => finish(connected));
+  socket.on('error', () => finish(false));
+  socket.on('close', () => finish(false));
+
+  return defer.promise;
 };
 
 ArcamSa20Plugin.prototype.queryStatus = function() {
@@ -1171,37 +1384,54 @@ ArcamSa20Plugin.prototype._handleAmpSocketDisconnect = function(socket, err) {
   this._destroyAmpSocket(false, err && err.message ? err.message : 'socket closed');
 };
 
-ArcamSa20Plugin.prototype._tryExtractAmpResponseFrame = function() {
-  if (!this.ampSocketBuffer || !this.ampSocketBuffer.length) {
-    return null;
+ArcamSa20Plugin.prototype._extractAmpResponseFrameFromBuffer = function(buffer) {
+  let working = buffer && buffer.length ? buffer : Buffer.alloc(0);
+  if (!working.length) {
+    return {
+      frame: null,
+      rest: Buffer.alloc(0)
+    };
   }
 
-  const startIndex = this.ampSocketBuffer.indexOf(0x21);
+  const startIndex = working.indexOf(0x21);
   if (startIndex === -1) {
-    this.ampSocketBuffer = Buffer.alloc(0);
-    return null;
+    return {
+      frame: null,
+      rest: Buffer.alloc(0)
+    };
   }
   if (startIndex > 0) {
-    this.ampSocketBuffer = this.ampSocketBuffer.slice(startIndex);
+    working = working.slice(startIndex);
+  }
+  if (working.length < 6) {
+    return {
+      frame: null,
+      rest: working
+    };
   }
 
-  if (this.ampSocketBuffer.length < 6) {
-    return null;
-  }
-
-  const declaredLength = this.ampSocketBuffer[4];
+  const declaredLength = working[4];
   const frameLength = 6 + declaredLength;
-  if (this.ampSocketBuffer.length < frameLength) {
-    return null;
+  if (working.length < frameLength) {
+    return {
+      frame: null,
+      rest: working
+    };
   }
-  if (this.ampSocketBuffer[frameLength - 1] !== 0x0D) {
-    this.ampSocketBuffer = this.ampSocketBuffer.slice(1);
-    return this._tryExtractAmpResponseFrame();
+  if (working[frameLength - 1] !== 0x0D) {
+    return this._extractAmpResponseFrameFromBuffer(working.slice(1));
   }
 
-  const frame = this.ampSocketBuffer.slice(0, frameLength);
-  this.ampSocketBuffer = this.ampSocketBuffer.slice(frameLength);
-  return frame;
+  return {
+    frame: working.slice(0, frameLength),
+    rest: working.slice(frameLength)
+  };
+};
+
+ArcamSa20Plugin.prototype._tryExtractAmpResponseFrame = function() {
+  const extracted = this._extractAmpResponseFrameFromBuffer(this.ampSocketBuffer);
+  this.ampSocketBuffer = extracted.rest;
+  return extracted.frame;
 };
 
 ArcamSa20Plugin.prototype._handleAmpSocketData = function(chunk) {

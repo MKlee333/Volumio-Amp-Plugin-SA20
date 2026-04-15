@@ -37,7 +37,7 @@
           "element": "input",
           "type": "text",
           "label": "SA20 host / IP",
-          "doc": "Manual network target for the amplifier. Automatic discovery is not used.",
+          "doc": "Manual network target for the amplifier. Leave empty and use discovery to scan the local network.",
           "value": "192.168.178.27"
         },
         {
@@ -67,6 +67,21 @@
             "data": {
               "endpoint": "system_hardware/arcam_sa20",
               "method": "testConnection",
+              "data": ""
+            }
+          }
+        },
+        {
+          "id": "discoverSa20Host",
+          "element": "button",
+          "label": "Discover SA20 on network",
+          "description": "Scan the local IPv4 subnets for an amplifier responding on the SA20 TCP control port",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": {
+              "endpoint": "system_hardware/arcam_sa20",
+              "method": "discoverSa20Host",
               "data": ""
             }
           }
