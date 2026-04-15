@@ -1,6 +1,6 @@
 {
   "name": "arcam_sa20",
-  "version": "0.18.1",
+  "version": "0.18.2",
   "description": "ARCAM SA20 network control plugin for Volumio with persistent TCP control, system-status polling and play automation",
   "main": "index.js",
   "scripts": {
@@ -8,19 +8,15 @@
   },
   "author": "MKlee333",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/MKlee333/Volumio-Amp-Plugin-SA20.git"
-  },
+  "repository": "https://github.com/MKlee333/Volumio-Amp-Plugin-SA20.git",
   "volumio_info": {
     "prettyName": "ARCAM SA20",
     "icon": "fa-volume-up",
     "plugin_type": "system_hardware",
     "architectures": [
-      "arm",
-      "armv7",
-      "armv8",
-      "x86_amd64"
+      "amd64",
+      "armhf",
+      "i386"
     ],
     "os": [
       "buster",
@@ -28,8 +24,8 @@
       "bookworm"
     ],
     "details": "Controls an ARCAM SA20 amplifier over the documented TCP protocol on port 50000. Uses a persistent TCP session, system-status polling, Volumio volume override and optional power/source/volume automation on Play.",
-    "changelog": "0.18.1 Align package metadata, harden lifecycle cleanup, and keep status polling on the SA20 system-status path with diff-based updates.",
-    "version": "0.18.1"
+    "changelog": "0.18.2 Align package metadata to Volumio store submission requirements.",
+    "version": "0.18.2"
   },
   "engines": {
     "node": ">=8",
