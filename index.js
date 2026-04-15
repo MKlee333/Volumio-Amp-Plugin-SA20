@@ -33,6 +33,8 @@ const AMP_IO_PRIORITY = {
   NORMAL: 50,
   HIGH: 100
 };
+const STATUS_POLL_INTERVAL_MS = 500;
+const STATUS_POLL_EXTENDED_EVERY = 8;
 
 module.exports = ArcamSa20Plugin;
 
@@ -71,6 +73,8 @@ function ArcamSa20Plugin(context) {
   this.ampIoPending = [];
   this.ampIoActive = false;
   this.ampIoSeq = 0;
+  this.liveStatusSequence = 0;
+  this.lastPushedStatusSummary = null;
   this.manualApplyRunning = false;
   this.userCommandRunning = false;
 }
@@ -438,7 +442,7 @@ ArcamSa20Plugin.prototype.queryStatus = function() {
 };
 
 ArcamSa20Plugin.prototype.queryStatusSilent = function() {
-  return this._pollStatusAndReflect();
+  return this._pollStatusAndReflect(true);
 };
 
 ArcamSa20Plugin.prototype.powerOn = function() {
@@ -1049,6 +1053,18 @@ ArcamSa20Plugin.prototype._pushUiConfigRefresh = function() {
     .fail(() => libQ.resolve());
 };
 
+ArcamSa20Plugin.prototype._pushStatusSummaryRefreshIfChanged = function(summary) {
+  const resolvedSummary = typeof summary === 'string' ? summary : conf.get('statusSummary');
+  if (!resolvedSummary) {
+    return libQ.resolve();
+  }
+  if (resolvedSummary === this.lastPushedStatusSummary) {
+    return libQ.resolve();
+  }
+  this.lastPushedStatusSummary = resolvedSummary;
+  return this._pushUiConfigRefresh();
+};
+
 ArcamSa20Plugin.prototype._rebuildStatusSummaryFromCache = function() {
   const summary = [
     'PWR ' + (conf.get('lastPower') || '-'),
@@ -1089,7 +1105,7 @@ ArcamSa20Plugin.prototype._publishVolumeToVolumioIfChanged = function() {
   });
 };
 
-ArcamSa20Plugin.prototype._pollStatusAndReflect = function() {
+ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull) {
   if (this.manualApplyRunning || this.userCommandRunning) {
     return libQ.resolve();
   }
@@ -1099,7 +1115,7 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function() {
 
   this.liveStatusBusy = true;
 
-  return this._queryAndCacheStatus()
+  return this._queryAndCacheStatus(forceFull)
     .then(() => {
       this.ampStatusPollFailureCount = 0;
       const availability = this._evaluateAmpAvailability(conf.get('lastPower'), conf.get('lastSource'));
@@ -1110,6 +1126,7 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function() {
       }
     })
     .then(() => this._rebuildStatusSummaryFromCache())
+    .then((summary) => this._pushStatusSummaryRefreshIfChanged(summary).then(() => summary))
     .then(() => this._publishVolumeToVolumioIfChanged())
     .fail((err) => {
       this.ampStatusPollFailureCount += 1;
@@ -1136,21 +1153,29 @@ ArcamSa20Plugin.prototype._stopLiveStatusTimer = function() {
 
 ArcamSa20Plugin.prototype._startLiveStatusTimer = function() {
   this._stopLiveStatusTimer();
-  this._pollStatusAndReflect();
+  this.liveStatusSequence = 0;
+  this._pollStatusAndReflect(true);
   this.liveStatusTimer = setInterval(() => {
-    this._pollStatusAndReflect();
-  }, 5000);
+    this._pollStatusAndReflect(false);
+  }, STATUS_POLL_INTERVAL_MS);
 };
 
 
-ArcamSa20Plugin.prototype._queryAndCacheStatus = function() {
-  return this._runSeries([
+ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull) {
+  const includeExtended = !!forceFull || (this.liveStatusSequence % STATUS_POLL_EXTENDED_EVERY) === 0;
+  this.liveStatusSequence += 1;
+  const steps = [
     () => this._querySource(),
-    () => this._queryMute(),
-    () => this._queryPower(),
-    () => this._queryVolume(),
-    () => this._queryBalance()
-  ]).then(() => {
+    () => this._queryMute()
+  ];
+
+  if (includeExtended) {
+    steps.push(() => this._queryPower());
+    steps.push(() => this._queryVolume());
+    steps.push(() => this._queryBalance());
+  }
+
+  return this._runSeries(steps).then(() => {
     const now = new Date();
     const ts = now.getFullYear() + '-' +
       String(now.getMonth() + 1).padStart(2, '0') + '-' +
