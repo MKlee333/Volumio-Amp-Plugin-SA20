@@ -55,6 +55,7 @@ const AMP_IO_PRIORITY = {
 const STATUS_POLL_INTERVAL_MS = 500;
 const STATUS_POLL_EXTENDED_EVERY = 8;
 const STATUS_QUERY_RETRY_COOLDOWN_MS = 30000;
+const BALANCE_DISPLAY_RESTORE_DELAY_MS = 250;
 
 module.exports = ArcamSa20Plugin;
 
@@ -601,7 +602,10 @@ ArcamSa20Plugin.prototype._probeSa20Host = function(host, port, timeoutMs) {
 };
 
 ArcamSa20Plugin.prototype.queryStatus = function() {
-  return this._refreshStatusStrict(true)
+  return this._refreshStatusStrict(true, {
+    includeBalance: true,
+    preferSystemStatus: true
+  })
     .then(() => {
       this._toast('success', 'ARCAM SA20', 'Amplifier status refreshed');
     })
@@ -611,8 +615,8 @@ ArcamSa20Plugin.prototype.queryStatus = function() {
     });
 };
 
-ArcamSa20Plugin.prototype.queryStatusSilent = function() {
-  return this._pollStatusAndReflect(true);
+ArcamSa20Plugin.prototype.queryStatusSilent = function(options) {
+  return this._pollStatusAndReflect(true, options);
 };
 
 ArcamSa20Plugin.prototype.powerOn = function() {
@@ -674,12 +678,16 @@ ArcamSa20Plugin.prototype._applyManualState = function(options) {
   }
   if (balance !== null) {
     steps.push(() => this._sendCommandNoAck(0x3B, [this._encodeBalance(balance)], AMP_IO_PRIORITY.NORMAL)
-      .then(() => this._delay(150)));
+      .then(() => this._delay(150))
+      .then(() => this._restoreSourceDisplayAfterBalance()));
   }
 
   return this._runSeries(steps)
     .then(() => this._publishVolumeToVolumioIfChanged().fail(() => libQ.resolve()))
-    .then(() => this.queryStatusSilent().fail(() => libQ.resolve()))
+    .then(() => this.queryStatusSilent({
+      includeBalance: false,
+      preferSystemStatus: false
+    }).fail(() => libQ.resolve()))
     .then(() => {
       if (settings.successMessage) {
         this._toast('success', 'ARCAM SA20', settings.successMessage);
@@ -1258,7 +1266,7 @@ ArcamSa20Plugin.prototype._publishVolumeToVolumioIfChanged = function() {
   });
 };
 
-ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull) {
+ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull, options) {
   if (this.manualApplyRunning || this.userCommandRunning) {
     return libQ.resolve();
   }
@@ -1268,7 +1276,7 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull) {
 
   this.liveStatusBusy = true;
 
-  return this._queryAndCacheStatus(forceFull)
+  return this._queryAndCacheStatus(forceFull, options)
     .then(() => {
       this.ampStatusPollFailureCount = 0;
       const availability = this._evaluateAmpAvailability(conf.get('lastPower'), conf.get('lastSource'));
@@ -1298,14 +1306,14 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull) {
     });
 };
 
-ArcamSa20Plugin.prototype._refreshStatusStrict = function(forceFull) {
+ArcamSa20Plugin.prototype._refreshStatusStrict = function(forceFull, options) {
   if (this.manualApplyRunning || this.userCommandRunning || this.liveStatusBusy) {
     return libQ.reject(new Error('status refresh busy'));
   }
 
   this.liveStatusBusy = true;
 
-  return this._queryAndCacheStatus(forceFull)
+  return this._queryAndCacheStatus(forceFull, options)
     .then(() => {
       this.ampStatusPollFailureCount = 0;
       const availability = this._evaluateAmpAvailability(conf.get('lastPower'), conf.get('lastSource'));
@@ -1341,8 +1349,7 @@ ArcamSa20Plugin.prototype._startLiveStatusTimer = function() {
 };
 
 
-ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull) {
-  const includeExtended = !!forceFull || (this.liveStatusSequence % STATUS_POLL_EXTENDED_EVERY) === 0;
+ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull, options) {
   this.liveStatusSequence += 1;
   const runLegacyStatusSequence = () => {
     const steps = [
@@ -1350,23 +1357,19 @@ ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull) {
       () => this._queryMute()
     ];
 
-    if (includeExtended) {
-      steps.push(() => this._queryPower());
-      steps.push(() => this._queryVolume());
-      steps.push(() => this._queryBalance());
-      steps.push(() => this._queryDacFilter());
-    }
+    steps.push(() => this._queryPower());
+    steps.push(() => this._queryVolume());
+    steps.push(() => this._queryBalance());
+    steps.push(() => this._queryDacFilter());
 
     return this._runSeries(steps);
   };
 
-  const statusPromise = includeExtended ?
-    this._querySystemStatus()
-      .fail((err) => {
-        this._log('system status query failed; falling back to individual queries: ' + err.message);
-        return runLegacyStatusSequence();
-      }) :
-    runLegacyStatusSequence();
+  const statusPromise = this._querySystemStatus()
+    .fail((err) => {
+      this._log('system status query failed; falling back to individual queries: ' + err.message);
+      return runLegacyStatusSequence();
+    });
 
   return statusPromise.then(() => {
     const now = new Date();
@@ -1481,7 +1484,7 @@ ArcamSa20Plugin.prototype._queryBalance = function() {
     const parsed = this._parseBalance(resp);
     conf.set('lastBalance', parsed);
     conf.set('manualBalance', this._balanceStringToInt(parsed));
-    return parsed;
+    return this._restoreSourceDisplayAfterBalance().fail(() => libQ.resolve()).then(() => parsed);
   }).fail((err) => {
     if (this._isTimeoutError(err)) {
       this._markStatusQueryTimeout('balance');
@@ -1545,17 +1548,17 @@ ArcamSa20Plugin.prototype._applySystemStatusFrames = function(frames) {
     }
     switch (resp.command) {
       case 0x00:
-        conf.set('lastPower', resp.answerCode === 0x00 ? this._parsePower(resp) : 'Unknown');
+        this._setConfigIfChanged('lastPower', resp.answerCode === 0x00 ? this._parsePower(resp) : 'Unknown');
         this._clearStatusQuerySuppression('power');
         recognized += 1;
         break;
       case 0x0D:
         if (resp.answerCode === 0x00) {
           const parsedVolume = this._parseVolume(resp);
-          conf.set('lastVolume', parsedVolume);
+          this._setConfigIfChanged('lastVolume', parsedVolume);
           this.cachedVolume = this._clampInt(parsedVolume, 0, 99, this.cachedVolume);
         } else {
-          conf.set('lastVolume', 'Unknown');
+          this._setConfigIfChanged('lastVolume', 'Unknown');
         }
         this._clearStatusQuerySuppression('volume');
         recognized += 1;
@@ -1563,25 +1566,25 @@ ArcamSa20Plugin.prototype._applySystemStatusFrames = function(frames) {
       case 0x0E:
         if (resp.answerCode === 0x00) {
           const parsedMute = this._parseMute(resp);
-          conf.set('lastMute', parsedMute);
+          this._setConfigIfChanged('lastMute', parsedMute);
           this.cachedMute = parsedMute === 'Muted';
         } else {
-          conf.set('lastMute', 'Unknown');
+          this._setConfigIfChanged('lastMute', 'Unknown');
         }
         this._clearStatusQuerySuppression('mute');
         recognized += 1;
         break;
       case 0x1D:
-        conf.set('lastSource', resp.answerCode === 0x00 ? this._parseSource(resp) : 'Unknown');
+        this._setConfigIfChanged('lastSource', resp.answerCode === 0x00 ? this._parseSource(resp) : 'Unknown');
         recognized += 1;
         break;
       case 0x3B:
         if (resp.answerCode === 0x00) {
           const parsedBalance = this._parseBalance(resp);
-          conf.set('lastBalance', parsedBalance);
-          conf.set('manualBalance', this._balanceStringToInt(parsedBalance));
+          this._setConfigIfChanged('lastBalance', parsedBalance);
+          this._setConfigIfChanged('manualBalance', this._balanceStringToInt(parsedBalance));
         } else {
-          conf.set('lastBalance', 'Unknown');
+          this._setConfigIfChanged('lastBalance', 'Unknown');
         }
         this._clearStatusQuerySuppression('balance');
         recognized += 1;
@@ -1589,10 +1592,10 @@ ArcamSa20Plugin.prototype._applySystemStatusFrames = function(frames) {
       case 0x61:
         if (resp.answerCode === 0x00) {
           const parsedDacFilter = this._parseDacFilter(resp);
-          conf.set('lastDacFilter', parsedDacFilter);
-          conf.set('dacFilter', parsedDacFilter);
+          this._setConfigIfChanged('lastDacFilter', parsedDacFilter);
+          this._setConfigIfChanged('dacFilter', parsedDacFilter);
         } else {
-          conf.set('lastDacFilter', 'Unknown');
+          this._setConfigIfChanged('lastDacFilter', 'Unknown');
         }
         recognized += 1;
         break;
@@ -2125,6 +2128,20 @@ ArcamSa20Plugin.prototype._setDacFilter = function(filterName) {
     .then(() => normalized);
 };
 
+ArcamSa20Plugin.prototype._restoreSourceDisplayAfterBalance = function() {
+  const source = this._normalizeSourceSelection(
+    conf.get('lastSource'),
+    this._normalizeSourceSelection(conf.get('manualSource'), conf.get('playSource') || 'CD')
+  );
+  const sourceCode = SOURCE_CODES[source];
+  if (typeof sourceCode !== 'number') {
+    return libQ.resolve();
+  }
+  return this._delay(BALANCE_DISPLAY_RESTORE_DELAY_MS)
+    .then(() => this._sendCommandNoAck(0x1D, [sourceCode], AMP_IO_PRIORITY.NORMAL))
+    .then(() => this._delay(150));
+};
+
 ArcamSa20Plugin.prototype._readDefaultPreset = function() {
   const storedPresetJson = String(conf.get('defaultPresetJson') || '').trim();
   if (storedPresetJson) {
@@ -2216,6 +2233,15 @@ ArcamSa20Plugin.prototype._setUIValue = function(uiconf, id, value) {
       }
     });
   });
+};
+
+ArcamSa20Plugin.prototype._setConfigIfChanged = function(key, value) {
+  const currentValue = conf.get(key);
+  if (currentValue === value) {
+    return false;
+  }
+  conf.set(key, value);
+  return true;
 };
 
 ArcamSa20Plugin.prototype._runSeries = function(tasks) {
