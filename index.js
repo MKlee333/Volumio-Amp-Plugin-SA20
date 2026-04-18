@@ -899,7 +899,12 @@ ArcamSa20Plugin.prototype._activateSocketIO = function() {
   this.socket.emit('getState');
 
   this.socket.on('pushState', (data) => {
-    const current = data && data.status ? data.status : null;
+    const hasPlaybackStatus = !!(data && typeof data.status === 'string' && data.status.length);
+    if (!hasPlaybackStatus) {
+      return;
+    }
+
+    const current = data.status;
     const previous = this.prevPlaybackStatus;
 
     this.currentPlaybackStatus = current;
@@ -1028,14 +1033,10 @@ ArcamSa20Plugin.prototype._preparePlaybackAutomation = function() {
     })
     .then((result) => {
       this.didAutoPowerOnForCurrentPlay = false;
-  this.liveStatusTimer = null;
-  this.liveStatusBusy = false;
       return result;
     })
     .fail((err) => {
       this.didAutoPowerOnForCurrentPlay = false;
-  this.liveStatusTimer = null;
-  this.liveStatusBusy = false;
       return libQ.reject(err);
     });
 };
@@ -1051,8 +1052,6 @@ ArcamSa20Plugin.prototype._issuePlaybackPowerOn = function(reason) {
 
 ArcamSa20Plugin.prototype._ensurePoweredForPlayback = function() {
   this.didAutoPowerOnForCurrentPlay = false;
-  this.liveStatusTimer = null;
-  this.liveStatusBusy = false;
 
   return this._queryPower()
     .then((power) => {
@@ -1076,8 +1075,6 @@ ArcamSa20Plugin.prototype._ensurePoweredForPlayback = function() {
         return this._issuePlaybackPowerOn('power query failed');
       }
       this.didAutoPowerOnForCurrentPlay = false;
-  this.liveStatusTimer = null;
-  this.liveStatusBusy = false;
       return libQ.reject(err);
     });
 };
