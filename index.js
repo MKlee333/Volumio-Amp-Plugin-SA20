@@ -56,6 +56,9 @@ const STATUS_POLL_INTERVAL_MS = 500;
 const STATUS_POLL_EXTENDED_EVERY = 8;
 const STATUS_QUERY_RETRY_COOLDOWN_MS = 30000;
 const BALANCE_DISPLAY_RESTORE_DELAY_MS = 250;
+const PLAYBACK_POWER_POLL_INTERVAL_MS = 200;
+const PLAYBACK_POWER_ON_CONFIRM_TIMEOUT_MS = 20000;
+const MANUAL_POWER_ON_STATUS_DELAY_MS = 3500;
 
 module.exports = ArcamSa20Plugin;
 
@@ -203,7 +206,6 @@ ArcamSa20Plugin.prototype.getUIConfig = function() {
     this._setUIValue(uiconf, 'setVolumeOnPlay', conf.get('setVolumeOnPlay'));
     this._setUIValue(uiconf, 'playVolumeValue', conf.get('playVolume'));
     this._setUIValue(uiconf, 'dacFilterValue', this._normalizeDacFilterSelection(conf.get('lastDacFilter'), conf.get('dacFilter') || 'Apodizing'));
-    this._setUIValue(uiconf, 'powerOnDelayMs', conf.get('powerOnDelayMs'));
     this._setUIValue(uiconf, 'autoPowerOffOnIdle', conf.get('autoPowerOffOnIdle'));
     this._setUIValue(uiconf, 'stopPlaybackWhenAmpUnavailable', !!conf.get('stopPlaybackWhenAmpUnavailable'));
     this._setUIValue(uiconf, 'idlePowerOffDelaySec', conf.get('idlePowerOffDelaySec'));
@@ -251,7 +253,6 @@ ArcamSa20Plugin.prototype.saveBehaviorConfig = function(data) {
   conf.set('setVolumeOnPlay', !!data.setVolumeOnPlay);
   conf.set('playVolume', this._readClampedUiInt(data, ['playVolumeValue', 'playVolumeSlider', 'playVolume'], 0, 99, 30));
   conf.set('dacFilter', requestedDacFilter);
-  conf.set('powerOnDelayMs', this._clampInt(data.powerOnDelayMs, 0, 15000, 3500));
   conf.set('autoPowerOffOnIdle', !!data.autoPowerOffOnIdle);
   conf.set('stopPlaybackWhenAmpUnavailable', !!data.stopPlaybackWhenAmpUnavailable);
   conf.set('idlePowerOffDelaySec', this._clampInt(data.idlePowerOffDelaySec, 1, 86400, 900));
@@ -292,7 +293,6 @@ ArcamSa20Plugin.prototype.resetDefaultPreset = function() {
     'playVolume',
     'dacFilter',
     'manualBalance',
-    'powerOnDelayMs',
     'debugLogging',
     'autoPowerOffOnIdle',
     'stopPlaybackWhenAmpUnavailable',
@@ -634,7 +634,7 @@ ArcamSa20Plugin.prototype.queryStatusSilent = function(options) {
 ArcamSa20Plugin.prototype.powerOn = function() {
   conf.set('lastPower', 'On');
   return this._sendCommandNoAck(0x00, [0x01], AMP_IO_PRIORITY.HIGH)
-    .then(() => this._delay(this._clampInt(conf.get('powerOnDelayMs'), 0, 15000, 3500)))
+    .then(() => this._delay(MANUAL_POWER_ON_STATUS_DELAY_MS))
     .then(() => this.queryStatusSilent().fail(() => libQ.resolve()));
 };
 
@@ -994,7 +994,9 @@ ArcamSa20Plugin.prototype._handlePlayTransition = function() {
     return;
   }
 
+  const restartLiveStatusTimer = !!this.liveStatusTimer;
   this.playAutomationRunning = true;
+  this._stopLiveStatusTimer();
 
   this._preparePlaybackAutomation()
     .then(() => {
@@ -1004,11 +1006,25 @@ ArcamSa20Plugin.prototype._handlePlayTransition = function() {
       });
     })
     .fail((err) => {
+      if (this._isPlaybackStartupNetworkFailure(err)) {
+        return this._stopVolumioPlaybackForStartupFailure()
+          .fin(() => {
+            this._toast('error', 'ARCAM SA20', 'ARCAM SA20 is not reachable over network! Maybe it is switched off or disconnected?');
+            this._log('play automation aborted after SA20 startup network failure: ' + err.message);
+          });
+      }
       this._toast('error', 'ARCAM SA20', 'Play automation failed: ' + err.message);
       this._log('play automation failed: ' + err.message);
     })
     .fin(() => {
       this.playAutomationRunning = false;
+      if (restartLiveStatusTimer) {
+        setTimeout(() => {
+          if (!this.playAutomationRunning && !this.manualApplyRunning && !this.userCommandRunning) {
+            this._startLiveStatusTimer();
+          }
+        }, 500);
+      }
     });
 };
 
@@ -1016,16 +1032,18 @@ ArcamSa20Plugin.prototype._preparePlaybackAutomation = function() {
   return this._ensurePoweredForPlayback()
     .then(() => {
       const steps = [];
+      const playbackSource = this._normalizeSourceSelection(conf.get('playSource'), 'CD');
+      const playbackVolume = this._clampInt(conf.get('playVolume'), 0, 99, 30);
 
-      if (this._isMutedCached()) {
+      if (conf.get('lastMute') !== 'Unmuted') {
         steps.push(() => this._setMuteState(false, 'playback start unmute'));
       }
 
-      if (conf.get('switchSourceOnPlay')) {
+      if (conf.get('switchSourceOnPlay') && conf.get('lastSource') !== playbackSource) {
         steps.push(() => this._setPlaybackSource());
       }
 
-      if (conf.get('setVolumeOnPlay')) {
+      if (conf.get('setVolumeOnPlay') && String(conf.get('lastVolume')) !== String(playbackVolume)) {
         steps.push(() => this._setPlaybackVolume());
       }
 
@@ -1043,11 +1061,89 @@ ArcamSa20Plugin.prototype._preparePlaybackAutomation = function() {
 
 ArcamSa20Plugin.prototype._issuePlaybackPowerOn = function(reason) {
   this.didAutoPowerOnForCurrentPlay = true;
-  conf.set('lastPower', 'On');
   this._log('attempting playback power-on (' + reason + ')');
   return this._sendCommandNoAck(0x00, [0x01], AMP_IO_PRIORITY.HIGH)
-    .then(() => this._delay(this._clampInt(conf.get('powerOnDelayMs'), 0, 15000, 3500)))
+    .then(() => this._waitForConfirmedPowerOn())
     .then(() => true);
+};
+
+ArcamSa20Plugin.prototype._queryPowerForPlayback = function() {
+  return this._sendStatusQuery(0x00, [0xF0], AMP_IO_PRIORITY.HIGH).then((resp) => {
+    if (resp.answerCode !== 0x00) {
+      conf.set('lastPower', 'Unknown');
+      return 'Unknown';
+    }
+    const parsed = this._parsePower(resp);
+    conf.set('lastPower', parsed);
+    return parsed;
+  }).fail((err) => {
+    if (this._isTimeoutError(err)) {
+      conf.set('lastPower', 'Unknown');
+      return 'Unknown';
+    }
+    return libQ.reject(err);
+  });
+};
+
+ArcamSa20Plugin.prototype._waitForConfirmedPowerOn = function() {
+  const timeoutMs = PLAYBACK_POWER_ON_CONFIRM_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  const poll = () => {
+    return this._queryPowerForPlayback().then((power) => {
+      if (power === 'On') {
+        return true;
+      }
+      if (Date.now() >= deadline) {
+        const err = new Error('amplifier did not confirm power on within timeout');
+        err.code = 'PLAYBACK_POWER_ON_TIMEOUT';
+        return libQ.reject(err);
+      }
+      return this._delay(PLAYBACK_POWER_POLL_INTERVAL_MS).then(() => poll());
+    });
+  };
+
+  return poll();
+};
+
+ArcamSa20Plugin.prototype._stopVolumioPlaybackForStartupFailure = function() {
+  const stopViaSocket = () => {
+    try {
+      if (this.socket) {
+        this.socket.emit('stop');
+      }
+    } catch (e) {
+      // ignore
+    }
+    return libQ.resolve();
+  };
+
+  try {
+    if (this.commandRouter && typeof this.commandRouter.volumioStop === 'function') {
+      const maybe = this.commandRouter.volumioStop();
+      return libQ.resolve(maybe).fail(() => stopViaSocket());
+    }
+  } catch (e) {
+    return stopViaSocket();
+  }
+
+  return stopViaSocket();
+};
+
+ArcamSa20Plugin.prototype._isPlaybackStartupNetworkFailure = function(err) {
+  const message = String(err && err.message ? err.message : '').toLowerCase();
+  if (err && err.code === 'PLAYBACK_POWER_ON_TIMEOUT') {
+    return true;
+  }
+  if (message === 'timeout') {
+    return true;
+  }
+  return message.indexOf('ehostunreach') !== -1 ||
+    message.indexOf('enetunreach') !== -1 ||
+    message.indexOf('econnrefused') !== -1 ||
+    message.indexOf('econnreset') !== -1 ||
+    message.indexOf('socket closed') !== -1 ||
+    message.indexOf('socket ended') !== -1;
 };
 
 ArcamSa20Plugin.prototype._ensurePoweredForPlayback = function() {
@@ -2187,7 +2283,6 @@ ArcamSa20Plugin.prototype._captureCurrentPreset = function() {
     'playVolume',
     'dacFilter',
     'manualBalance',
-    'powerOnDelayMs',
     'debugLogging',
     'autoPowerOffOnIdle',
     'stopPlaybackWhenAmpUnavailable',

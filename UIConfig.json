@@ -124,7 +124,6 @@
           "setVolumeOnPlay",
           "playVolumeValue",
           "dacFilterValue",
-          "powerOnDelayMs",
           "debugLogging",
           "autoPowerOffOnIdle",
           "stopPlaybackWhenAmpUnavailable",
@@ -199,14 +198,6 @@
             { "value": "Corrected Phase Fast Roll Off", "label": "Corrected Phase Fast Roll Off" },
             { "value": "Apodizing", "label": "Apodizing" }
           ]
-        },
-        {
-          "id": "powerOnDelayMs",
-          "element": "input",
-          "type": "number",
-          "label": "Delay after power-on (ms)",
-          "doc": "Wait time before source and volume commands are sent after waking the amplifier",
-          "value": 3500
         },
         {
           "id": "autoPowerOffOnIdle",
