@@ -1349,7 +1349,7 @@ ArcamSa20Plugin.prototype._pushStatusSummaryRefreshIfChanged = function(summary)
     return libQ.resolve();
   }
   this.lastPushedStatusSummary = statusSignature;
-  return this._pushUiConfigRefresh();
+  return libQ.resolve();
 };
 
 ArcamSa20Plugin.prototype._publishVolumeToVolumioIfChanged = function() {
@@ -1365,7 +1365,7 @@ ArcamSa20Plugin.prototype._publishVolumeToVolumioIfChanged = function() {
     this.lastPublishedVolume = vol;
     this.lastPublishedMute = mute;
 
-    return this.commandRouter.volumioupdatevolume(volumeObject)
+    return libQ.resolve(this.commandRouter.volumioupdatevolume(volumeObject))
       .fail(() => libQ.resolve())
       .then(() => volumeObject);
   });
@@ -2234,10 +2234,7 @@ ArcamSa20Plugin.prototype._setDacFilter = function(filterName) {
 };
 
 ArcamSa20Plugin.prototype._restoreSourceDisplayAfterBalance = function() {
-  const source = this._normalizeSourceSelection(
-    conf.get('lastSource'),
-    this._normalizeSourceSelection(conf.get('manualSource'), conf.get('playSource') || 'CD')
-  );
+  const source = this._normalizeSourceSelection(conf.get('lastSource'), 'Unknown');
   const sourceCode = SOURCE_CODES[source];
   if (typeof sourceCode !== 'number') {
     return libQ.resolve();
