@@ -58,6 +58,7 @@ const STATUS_QUERY_RETRY_COOLDOWN_MS = 30000;
 const BALANCE_DISPLAY_RESTORE_DELAY_MS = 250;
 const PLAYBACK_POWER_POLL_INTERVAL_MS = 200;
 const PLAYBACK_POWER_ON_CONFIRM_TIMEOUT_MS = 20000;
+const PLAYBACK_POWER_QUERY_TIMEOUT_MS = 1000;
 const MANUAL_POWER_ON_STATUS_DELAY_MS = 3500;
 
 module.exports = ArcamSa20Plugin;
@@ -1062,13 +1063,18 @@ ArcamSa20Plugin.prototype._preparePlaybackAutomation = function() {
 ArcamSa20Plugin.prototype._issuePlaybackPowerOn = function(reason) {
   this.didAutoPowerOnForCurrentPlay = true;
   this._log('attempting playback power-on (' + reason + ')');
+  this._destroyAmpSocket(true, 'forcing fresh socket before playback power on');
   return this._sendCommandNoAck(0x00, [0x01], AMP_IO_PRIORITY.HIGH)
     .then(() => this._waitForConfirmedPowerOn())
     .then(() => true);
 };
 
 ArcamSa20Plugin.prototype._queryPowerForPlayback = function() {
-  return this._sendStatusQuery(0x00, [0xF0], AMP_IO_PRIORITY.HIGH).then((resp) => {
+  return this._queueAmpIo(() => this._runAmpSocketCommand(0x00, [0xF0], {
+    expectResponse: true,
+    allowNonZeroAnswer: true,
+    timeoutMs: PLAYBACK_POWER_QUERY_TIMEOUT_MS
+  }), AMP_IO_PRIORITY.HIGH).then((resp) => {
     if (resp.answerCode !== 0x00) {
       conf.set('lastPower', 'Unknown');
       return 'Unknown';
@@ -1150,7 +1156,17 @@ ArcamSa20Plugin.prototype._ensurePoweredForPlayback = function() {
   this.didAutoPowerOnForCurrentPlay = false;
 
   return this._queryPower()
+    .fail((err) => {
+      if (!conf.get('autoPowerOnPlay')) {
+        return libQ.reject(err);
+      }
+      this._log('power query failed before playback: ' + err.message + '; attempting blind power-on');
+      return 'QueryFailed';
+    })
     .then((power) => {
+      if (power === 'QueryFailed') {
+        return this._issuePlaybackPowerOn('power query failed');
+      }
       if (power === 'On') {
         return libQ.resolve(false);
       }
@@ -1164,14 +1180,6 @@ ArcamSa20Plugin.prototype._ensurePoweredForPlayback = function() {
         return libQ.reject(new Error('amplifier is in standby and auto power on is disabled'));
       }
       return this._issuePlaybackPowerOn('amplifier in standby');
-    })
-    .fail((err) => {
-      if (conf.get('autoPowerOnPlay')) {
-        this._log('power query failed before playback: ' + err.message + '; attempting blind power-on');
-        return this._issuePlaybackPowerOn('power query failed');
-      }
-      this.didAutoPowerOnForCurrentPlay = false;
-      return libQ.reject(err);
     });
 };
 
@@ -1994,7 +2002,12 @@ ArcamSa20Plugin.prototype._runAmpSocketCommand = function(command, dataBytes, op
   const allowNonZeroAnswer = !!settings.allowNonZeroAnswer;
   const postWriteDelayMs = this._clampInt(settings.postWriteDelayMs, 0, 1000, 0);
   const onFrame = typeof settings.onFrame === 'function' ? settings.onFrame : null;
-  const timeoutMs = this._clampInt(conf.get('timeoutMs'), 500, 20000, 3000);
+  const timeoutMs = this._clampInt(
+    settings.timeoutMs,
+    200,
+    20000,
+    this._clampInt(conf.get('timeoutMs'), 500, 20000, 3000)
+  );
   const payload = Buffer.from([0x21, 0x01, command, dataBytes.length].concat(dataBytes).concat([0x0D]));
 
   return this._ensureAmpSocket().then((socket) => {
