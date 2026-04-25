@@ -1404,8 +1404,9 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull, options) {
     .then(() => this._publishVolumeToVolumioIfChanged())
     .fail((err) => {
       this.ampStatusPollFailureCount += 1;
-      if (this.ampStatusPollFailureCount >= 3) {
-        this._armAmpUnavailableStopTimer('status polling failed ' + this.ampStatusPollFailureCount + ' times');
+      const cachedAvailability = this._evaluateAmpAvailability(conf.get('lastPower'), conf.get('lastSource'));
+      if (cachedAvailability.confirmedUnavailable) {
+        this._armAmpUnavailableStopTimer(cachedAvailability.reason + '; status polling failed');
       } else {
         this._cancelAmpUnavailableStopTimer();
       }
