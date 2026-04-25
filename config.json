@@ -103,6 +103,22 @@
     "type": "string",
     "value": "PWR - | SRC - | VOL - | MUTE - | BAL -"
   },
+  "statusDetails": {
+    "type": "string",
+    "value": "SR - | LIFTER - | OUTPUT -"
+  },
+  "lastSampleRate": {
+    "type": "string",
+    "value": "Unknown"
+  },
+  "lastLifterTemp": {
+    "type": "string",
+    "value": "Unknown"
+  },
+  "lastOutputTemp": {
+    "type": "string",
+    "value": "Unknown"
+  },
   "defaultPresetInitialized": {
     "type": "boolean",
     "value": false

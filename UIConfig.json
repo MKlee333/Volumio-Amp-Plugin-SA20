@@ -33,6 +33,16 @@
           ]
         },
         {
+          "id": "statusDetails",
+          "element": "input",
+          "type": "text",
+          "label": "SA20 Signal / Temp",
+          "value": "SR - | LIFTER - | OUTPUT -",
+          "attributes": [
+            "disabled"
+          ]
+        },
+        {
           "id": "manualSource",
           "element": "select",
           "label": "Source",

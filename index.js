@@ -109,6 +109,7 @@ function ArcamSa20Plugin(context) {
   this.manualApplyRunning = false;
   this.userCommandRunning = false;
   this.startupRetryTimers = [];
+  this.lastPlaybackInfoSignature = null;
 }
 
 ArcamSa20Plugin.prototype.onVolumioStart = function() {
@@ -219,6 +220,7 @@ ArcamSa20Plugin.prototype.getUIConfig = function() {
 
     this._setUIValue(uiconf, 'connectionState', this._getConnectionStateText());
     this._setUIValue(uiconf, 'statusSummary', conf.get('statusSummary'));
+    this._setUIValue(uiconf, 'statusDetails', conf.get('statusDetails'));
     defer.resolve(uiconf);
   }).fail((err) => defer.reject(err));
 
@@ -934,6 +936,7 @@ ArcamSa20Plugin.prototype._handlePlaybackStateForIdlePowerOff = function(status)
     this._cancelIdlePowerOffTimer();
     return;
   }
+  this._resetPlaybackInfoToastState();
   this._cancelAmpUnavailableStopTimer();
   if (status === 'pause' || status === 'stop' || status === null) {
     this._armIdlePowerOffTimer();
@@ -1052,6 +1055,7 @@ ArcamSa20Plugin.prototype._preparePlaybackAutomation = function() {
     })
     .then((result) => {
       this.didAutoPowerOnForCurrentPlay = false;
+      this._resetPlaybackInfoToastState();
       return result;
     })
     .fail((err) => {
@@ -1333,7 +1337,13 @@ ArcamSa20Plugin.prototype._rebuildStatusSummaryFromCache = function() {
     'MUTE ' + (conf.get('lastMute') || '-'),
     'BAL ' + (conf.get('lastBalance') || '-')
   ].join(' | ');
+  const details = [
+    'SR ' + (conf.get('lastSampleRate') || '-'),
+    'LIFTER ' + (conf.get('lastLifterTemp') || '-'),
+    'OUTPUT ' + (conf.get('lastOutputTemp') || '-')
+  ].join(' | ');
   conf.set('statusSummary', summary);
+  conf.set('statusDetails', details);
   conf.set('connectionState', this._getConnectionStateText());
   return summary;
 };
@@ -1401,6 +1411,7 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull, options) {
     })
     .then(() => this._rebuildStatusSummaryFromCache())
     .then((summary) => this._pushStatusSummaryRefreshIfChanged(summary).then(() => summary))
+    .then(() => this._maybeToastPlaybackInfo())
     .then(() => this._publishVolumeToVolumioIfChanged())
     .fail((err) => {
       this.ampStatusPollFailureCount += 1;
@@ -1711,6 +1722,18 @@ ArcamSa20Plugin.prototype._applySystemStatusFrames = function(frames) {
         } else {
           this._setConfigIfChanged('lastDacFilter', 'Unknown');
         }
+        recognized += 1;
+        break;
+      case 0x44:
+        this._setConfigIfChanged('lastSampleRate', resp.answerCode === 0x00 ? this._parseSampleRate(resp) : 'Unknown');
+        recognized += 1;
+        break;
+      case 0x56:
+        this._setConfigIfChanged('lastLifterTemp', resp.answerCode === 0x00 ? this._parseTemperature(resp) : 'Unknown');
+        recognized += 1;
+        break;
+      case 0x57:
+        this._setConfigIfChanged('lastOutputTemp', resp.answerCode === 0x00 ? this._parseTemperature(resp) : 'Unknown');
         recognized += 1;
         break;
       default:
@@ -2199,6 +2222,27 @@ ArcamSa20Plugin.prototype._parseDacFilter = function(resp) {
   return DAC_FILTER_NAMES[resp.data[0]] || 'Unknown';
 };
 
+ArcamSa20Plugin.prototype._parseSampleRate = function(resp) {
+  if (!resp.data.length) return 'Unknown';
+  switch (resp.data[0]) {
+    case 0x00: return '32 kHz';
+    case 0x01: return '44.1 kHz';
+    case 0x02: return '48 kHz';
+    case 0x03: return '88.2 kHz';
+    case 0x04: return '96 kHz';
+    case 0x05: return '176.4 kHz';
+    case 0x06: return '192 kHz';
+    case 0x07: return 'Unknown';
+    case 0x08: return 'Undetected';
+    default: return 'Unknown';
+  }
+};
+
+ArcamSa20Plugin.prototype._parseTemperature = function(resp) {
+  if (!resp.data.length) return 'Unknown';
+  return String(resp.data[0]) + ' C';
+};
+
 ArcamSa20Plugin.prototype._encodeBalance = function(value) {
   if (value === 0) return 0x00;
   if (value > 0) return value;
@@ -2357,6 +2401,41 @@ ArcamSa20Plugin.prototype._setConfigIfChanged = function(key, value) {
   }
   conf.set(key, value);
   return true;
+};
+
+ArcamSa20Plugin.prototype._resetPlaybackInfoToastState = function() {
+  this.lastPlaybackInfoSignature = null;
+};
+
+ArcamSa20Plugin.prototype._getPlaybackInfoSignature = function() {
+  return [
+    String(conf.get('lastSampleRate') || 'Unknown'),
+    String(conf.get('lastLifterTemp') || 'Unknown'),
+    String(conf.get('lastOutputTemp') || 'Unknown')
+  ].join('|');
+};
+
+ArcamSa20Plugin.prototype._maybeToastPlaybackInfo = function() {
+  if (this.currentPlaybackStatus !== 'play') {
+    return libQ.resolve();
+  }
+
+  const sampleRate = String(conf.get('lastSampleRate') || 'Unknown');
+  const lifterTemp = String(conf.get('lastLifterTemp') || 'Unknown');
+  const outputTemp = String(conf.get('lastOutputTemp') || 'Unknown');
+
+  if (sampleRate === 'Unknown' && lifterTemp === 'Unknown' && outputTemp === 'Unknown') {
+    return libQ.resolve();
+  }
+
+  const signature = this._getPlaybackInfoSignature();
+  if (signature === this.lastPlaybackInfoSignature) {
+    return libQ.resolve();
+  }
+
+  this.lastPlaybackInfoSignature = signature;
+  this._toast('info', 'ARCAM SA20', 'SR ' + sampleRate + ' | Lifter ' + lifterTemp + ' | Output ' + outputTemp);
+  return libQ.resolve();
 };
 
 ArcamSa20Plugin.prototype._runSeries = function(tasks) {
