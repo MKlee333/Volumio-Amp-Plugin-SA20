@@ -1476,6 +1476,16 @@ ArcamSa20Plugin.prototype._startLiveStatusTimer = function() {
 
 ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull, options) {
   this.liveStatusSequence += 1;
+  const runStandbySafeStatusSequence = () => {
+    this._setConfigIfChanged('lastSource', 'Unknown');
+    this._setConfigIfChanged('lastMute', 'Unknown');
+    this._setConfigIfChanged('lastBalance', 'Unknown');
+    this._setConfigIfChanged('lastDacFilter', 'Unknown');
+    this._setConfigIfChanged('lastSampleRate', 'Unknown');
+    this._setConfigIfChanged('lastLifterTemp', 'Unknown');
+    this._setConfigIfChanged('lastOutputTemp', 'Unknown');
+    return this._queryPower();
+  };
   const runLegacyStatusSequence = () => {
     const steps = [
       () => this._querySource(),
@@ -1492,6 +1502,10 @@ ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull, options) {
 
   const statusPromise = this._querySystemStatus()
     .fail((err) => {
+      if (this._isAmpUnavailableAnswerCodeError(err)) {
+        this._log('system status reported unavailable/standby; querying power only');
+        return runStandbySafeStatusSequence();
+      }
       this._log('system status query failed; falling back to individual queries: ' + err.message);
       return runLegacyStatusSequence();
     });
@@ -2181,6 +2195,11 @@ ArcamSa20Plugin.prototype._parseResponse = function(buffer) {
 
 ArcamSa20Plugin.prototype._isTimeoutError = function(err) {
   return !!(err && err.message === 'timeout');
+};
+
+ArcamSa20Plugin.prototype._isAmpUnavailableAnswerCodeError = function(err) {
+  const message = String(err && err.message ? err.message : '').toLowerCase();
+  return message.indexOf('answer code 0x85') !== -1;
 };
 
 ArcamSa20Plugin.prototype._parsePower = function(resp) {
