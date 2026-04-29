@@ -60,6 +60,7 @@ const PLAYBACK_POWER_POLL_INTERVAL_MS = 200;
 const PLAYBACK_POWER_ON_CONFIRM_TIMEOUT_MS = 20000;
 const PLAYBACK_POWER_QUERY_TIMEOUT_MS = 1000;
 const MANUAL_POWER_ON_STATUS_DELAY_MS = 3500;
+const PREEMPTIVE_PLAY_POWER_ON_WINDOW_MS = 30000;
 
 module.exports = ArcamSa20Plugin;
 
@@ -110,6 +111,9 @@ function ArcamSa20Plugin(context) {
   this.userCommandRunning = false;
   this.startupRetryTimers = [];
   this.lastPlaybackInfoSignature = null;
+  this.originalVolumioPlay = null;
+  this.preemptivePlaybackPowerOnAt = 0;
+  this.preemptivePlaybackPowerOnPromise = null;
 }
 
 ArcamSa20Plugin.prototype.onVolumioStart = function() {
@@ -127,6 +131,7 @@ ArcamSa20Plugin.prototype.onStart = function() {
     this._clearStartupRetryTimers();
     this.cachedVolume = this._clampInt(conf.get('lastVolume'), 0, 99, this._clampInt(conf.get('playVolume'), 0, 99, 30));
     this.cachedMute = conf.get('lastMute') === 'Muted';
+    this._installVolumioPlayHook();
     this._activateSocketIO();
     this._ensureConfiguredHost()
       .fail(() => libQ.resolve())
@@ -156,6 +161,7 @@ ArcamSa20Plugin.prototype.onStop = function() {
   this._cancelIdlePowerOffTimer();
   this._stopLiveStatusTimer();
   this._destroyAmpSocket(true);
+  this._restoreVolumioPlayHook();
   if (this.socket) {
     try {
       this.socket.removeAllListeners();
@@ -1067,8 +1073,9 @@ ArcamSa20Plugin.prototype._preparePlaybackAutomation = function() {
 ArcamSa20Plugin.prototype._issuePlaybackPowerOn = function(reason) {
   this.didAutoPowerOnForCurrentPlay = true;
   this._log('attempting playback power-on (' + reason + ')');
-  this._destroyAmpSocket(true, 'forcing fresh socket before playback power on');
+  this.preemptivePlaybackPowerOnAt = Date.now();
   return this._sendCommandNoAck(0x00, [0x01], AMP_IO_PRIORITY.HIGH)
+    .then(() => this._delay(MANUAL_POWER_ON_STATUS_DELAY_MS))
     .then(() => this._waitForConfirmedPowerOn())
     .then(() => true);
 };
@@ -1102,11 +1109,13 @@ ArcamSa20Plugin.prototype._waitForConfirmedPowerOn = function() {
   const poll = () => {
     return this._queryPowerForPlayback().then((power) => {
       if (power === 'On') {
+        this.preemptivePlaybackPowerOnAt = 0;
         return true;
       }
       if (Date.now() >= deadline) {
         const err = new Error('amplifier did not confirm power on within timeout');
         err.code = 'PLAYBACK_POWER_ON_TIMEOUT';
+        this.preemptivePlaybackPowerOnAt = 0;
         return libQ.reject(err);
       }
       return this._delay(PLAYBACK_POWER_POLL_INTERVAL_MS).then(() => poll());
@@ -1158,6 +1167,11 @@ ArcamSa20Plugin.prototype._isPlaybackStartupNetworkFailure = function(err) {
 
 ArcamSa20Plugin.prototype._ensurePoweredForPlayback = function() {
   this.didAutoPowerOnForCurrentPlay = false;
+
+  if (this._hasRecentPreemptivePlaybackPowerOn()) {
+    this._log('waiting for confirmation of preemptive playback power-on');
+    return this._waitForConfirmedPowerOn().then(() => true);
+  }
 
   return this._queryPower()
     .fail((err) => {
@@ -1264,6 +1278,12 @@ ArcamSa20Plugin.prototype._armAmpUnavailableStopTimer = function(reason) {
     return;
   }
   this.lastAmpAvailabilityReason = reason || 'amplifier unavailable';
+  if ((conf.get('lastPower') || 'Unknown') === 'Standby') {
+    this._cancelAmpUnavailableStopTimer();
+    this._log('amplifier in standby while playing; stopping playback immediately (' + this.lastAmpAvailabilityReason + ')');
+    this._stopPlaybackForAmpUnavailable();
+    return;
+  }
   if (this.ampUnavailableStopTimer) {
     return;
   }
@@ -1390,7 +1410,7 @@ ArcamSa20Plugin.prototype._publishVolumeToVolumioIfChanged = function() {
 };
 
 ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull, options) {
-  if (this.manualApplyRunning || this.userCommandRunning) {
+  if (this.manualApplyRunning || this.userCommandRunning || this.playAutomationRunning) {
     return libQ.resolve();
   }
   if (this.liveStatusBusy) {
@@ -1476,7 +1496,8 @@ ArcamSa20Plugin.prototype._startLiveStatusTimer = function() {
 
 ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull, options) {
   this.liveStatusSequence += 1;
-  const runStandbySafeStatusSequence = () => {
+  const applyStandbySafeStatus = () => {
+    this._setConfigIfChanged('lastPower', 'Standby');
     this._setConfigIfChanged('lastSource', 'Unknown');
     this._setConfigIfChanged('lastMute', 'Unknown');
     this._setConfigIfChanged('lastBalance', 'Unknown');
@@ -1484,7 +1505,7 @@ ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull, options) {
     this._setConfigIfChanged('lastSampleRate', 'Unknown');
     this._setConfigIfChanged('lastLifterTemp', 'Unknown');
     this._setConfigIfChanged('lastOutputTemp', 'Unknown');
-    return this._queryPower();
+    return libQ.resolve();
   };
   const runLegacyStatusSequence = () => {
     const steps = [
@@ -1503,8 +1524,8 @@ ArcamSa20Plugin.prototype._queryAndCacheStatus = function(forceFull, options) {
   const statusPromise = this._querySystemStatus()
     .fail((err) => {
       if (this._isAmpUnavailableAnswerCodeError(err)) {
-        this._log('system status reported unavailable/standby; querying power only');
-        return runStandbySafeStatusSequence();
+        this._log('system status reported standby/unavailable; applying standby cache state');
+        return applyStandbySafeStatus();
       }
       this._log('system status query failed; falling back to individual queries: ' + err.message);
       return runLegacyStatusSequence();
@@ -2411,6 +2432,53 @@ ArcamSa20Plugin.prototype._setUIValue = function(uiconf, id, value) {
       }
     });
   });
+};
+
+ArcamSa20Plugin.prototype._installVolumioPlayHook = function() {
+  if (!this.commandRouter || typeof this.commandRouter.volumioPlay !== 'function' || this.originalVolumioPlay) {
+    return;
+  }
+
+  this.originalVolumioPlay = this.commandRouter.volumioPlay;
+  this.commandRouter.volumioPlay = (...args) => {
+    this._triggerPreemptivePlaybackPowerOn().fail(() => libQ.resolve());
+    return this.originalVolumioPlay.apply(this.commandRouter, args);
+  };
+};
+
+ArcamSa20Plugin.prototype._restoreVolumioPlayHook = function() {
+  if (!this.originalVolumioPlay || !this.commandRouter) {
+    return;
+  }
+  this.commandRouter.volumioPlay = this.originalVolumioPlay;
+  this.originalVolumioPlay = null;
+};
+
+ArcamSa20Plugin.prototype._hasRecentPreemptivePlaybackPowerOn = function() {
+  return !!this.preemptivePlaybackPowerOnAt && (Date.now() - this.preemptivePlaybackPowerOnAt) < PREEMPTIVE_PLAY_POWER_ON_WINDOW_MS;
+};
+
+ArcamSa20Plugin.prototype._triggerPreemptivePlaybackPowerOn = function() {
+  if (!conf.get('autoPowerOnPlay')) {
+    return libQ.resolve();
+  }
+  if ((conf.get('lastPower') || 'Unknown') !== 'Standby') {
+    return libQ.resolve();
+  }
+  if (this.preemptivePlaybackPowerOnPromise) {
+    return this.preemptivePlaybackPowerOnPromise;
+  }
+
+  this._log('preemptive playback power-on requested from volumioPlay');
+  this.didAutoPowerOnForCurrentPlay = true;
+  this.preemptivePlaybackPowerOnAt = Date.now();
+  this.preemptivePlaybackPowerOnPromise = this._sendCommandNoAck(0x00, [0x01], AMP_IO_PRIORITY.HIGH)
+    .then(() => this._delay(MANUAL_POWER_ON_STATUS_DELAY_MS))
+    .fin(() => {
+      this.preemptivePlaybackPowerOnPromise = null;
+    });
+
+  return this.preemptivePlaybackPowerOnPromise;
 };
 
 ArcamSa20Plugin.prototype._setConfigIfChanged = function(key, value) {
