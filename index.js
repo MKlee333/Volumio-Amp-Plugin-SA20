@@ -570,7 +570,6 @@ ArcamSa20Plugin.prototype._probeSa20Host = function(host, port, timeoutMs) {
   const socket = net.createConnection({ host: host, port: port });
   const payload = Buffer.from([0x21, 0x01, 0x00, 0x01, 0xF0, 0x0D]);
   let buffer = Buffer.alloc(0);
-  let connected = false;
   let settled = false;
 
   const finish = (matched) => {
@@ -590,7 +589,6 @@ ArcamSa20Plugin.prototype._probeSa20Host = function(host, port, timeoutMs) {
   socket.setTimeout(timeoutMs);
 
   socket.on('connect', () => {
-    connected = true;
     socket.write(payload, (err) => {
       if (err) {
         finish(false);
@@ -616,7 +614,7 @@ ArcamSa20Plugin.prototype._probeSa20Host = function(host, port, timeoutMs) {
     }
   });
 
-  socket.on('timeout', () => finish(connected));
+  socket.on('timeout', () => finish(false));
   socket.on('error', () => finish(false));
   socket.on('close', () => finish(false));
 
@@ -775,18 +773,6 @@ ArcamSa20Plugin.prototype.alsavolume = function(volumeRequest) {
   }
 
   return promise.then(() => this.getVolumeObject());
-};
-
-
-ArcamSa20Plugin.prototype._scheduleVolumeSync = function(delayMs) {
-  const waitMs = this._clampInt(delayMs, 50, 2000, 350);
-  if (this._volumeSyncTimer) {
-    clearTimeout(this._volumeSyncTimer);
-  }
-  this._volumeSyncTimer = setTimeout(() => {
-    this._volumeSyncTimer = null;
-    this._queryVolume().fail(() => libQ.resolve());
-  }, waitMs);
 };
 
 ArcamSa20Plugin.prototype._applyVolumeCommandNoAck = function(dataByte, nextVolume) {
@@ -1127,7 +1113,7 @@ ArcamSa20Plugin.prototype._waitForConfirmedPowerOn = function() {
   return poll();
 };
 
-ArcamSa20Plugin.prototype._stopVolumioPlaybackForStartupFailure = function() {
+ArcamSa20Plugin.prototype._requestVolumioStop = function() {
   const stopViaSocket = () => {
     try {
       if (this.socket) {
@@ -1149,6 +1135,10 @@ ArcamSa20Plugin.prototype._stopVolumioPlaybackForStartupFailure = function() {
   }
 
   return stopViaSocket();
+};
+
+ArcamSa20Plugin.prototype._stopVolumioPlaybackForStartupFailure = function() {
+  return this._requestVolumioStop();
 };
 
 ArcamSa20Plugin.prototype._isPlaybackStartupNetworkFailure = function(err) {
@@ -1248,42 +1238,7 @@ ArcamSa20Plugin.prototype._stopPlaybackForAmpUnavailable = function(reason) {
     return this.ampUnavailableStopInFlight;
   }
 
-  const stopViaSocket = () => {
-    try {
-      if (this.socket) {
-        this.socket.emit('stop');
-      }
-    } catch (e) {
-      // ignore
-    }
-    return libQ.resolve();
-  };
-
-  try {
-    if (this.commandRouter && typeof this.commandRouter.volumioStop === 'function') {
-      const maybe = this.commandRouter.volumioStop();
-      this.ampUnavailableStopInFlight = libQ.resolve(maybe)
-        .fail(() => stopViaSocket())
-        .then(() => {
-          this._log('playback stopped because amplifier became unavailable (' + stopReason + ')');
-        })
-        .fin(() => {
-          this.ampUnavailableStopInFlight = null;
-        });
-      return this.ampUnavailableStopInFlight;
-    }
-  } catch (e) {
-    this.ampUnavailableStopInFlight = stopViaSocket()
-      .then(() => {
-        this._log('playback stopped because amplifier became unavailable (' + stopReason + ')');
-      })
-      .fin(() => {
-        this.ampUnavailableStopInFlight = null;
-      });
-    return this.ampUnavailableStopInFlight;
-  }
-
-  this.ampUnavailableStopInFlight = stopViaSocket()
+  this.ampUnavailableStopInFlight = this._requestVolumioStop()
     .then(() => {
       this._log('playback stopped because amplifier became unavailable (' + stopReason + ')');
     })
@@ -1828,10 +1783,6 @@ ArcamSa20Plugin.prototype._pumpAmpIoQueue = function() {
       this.ampIoActive = false;
       this._pumpAmpIoQueue();
     });
-};
-
-ArcamSa20Plugin.prototype._isMutedCached = function() {
-  return this.cachedMute || conf.get('lastMute') === 'Muted';
 };
 
 ArcamSa20Plugin.prototype._getConfirmedMuteForDisplay = function() {
