@@ -82,6 +82,7 @@ function ArcamSa20Plugin(context) {
   this.cachedMute = false;
   this.idlePowerOffTimer = null;
   this.ampUnavailableStopTimer = null;
+  this.ampUnavailableStopInFlight = null;
   this.nativeVolumeSettings = null;
   this.ampStatusPollFailureCount = 0;
   this.lastAmpAvailabilityReason = 'startup';
@@ -650,6 +651,7 @@ ArcamSa20Plugin.prototype.powerOn = function() {
 ArcamSa20Plugin.prototype.powerOff = function() {
   conf.set('lastPower', 'Standby');
   return this._sendCommandNoAck(0x00, [0x00], AMP_IO_PRIORITY.HIGH)
+    .then(() => this._stopPlaybackForAmpUnavailable('manual amplifier power-off requested'))
     .then(() => this.queryStatusSilent().fail(() => libQ.resolve()));
 };
 
@@ -1233,11 +1235,17 @@ ArcamSa20Plugin.prototype._clearAmpUnavailableState = function(reason) {
   this._cancelAmpUnavailableStopTimer();
 };
 
-ArcamSa20Plugin.prototype._stopPlaybackForAmpUnavailable = function() {
+ArcamSa20Plugin.prototype._stopPlaybackForAmpUnavailable = function(reason) {
+  const stopReason = reason || this.lastAmpAvailabilityReason || 'amplifier unavailable';
+  this.lastAmpAvailabilityReason = stopReason;
   this.ampUnavailableStopTimer = null;
 
   if (this.currentPlaybackStatus !== 'play') {
     return libQ.resolve();
+  }
+
+  if (this.ampUnavailableStopInFlight) {
+    return this.ampUnavailableStopInFlight;
   }
 
   const stopViaSocket = () => {
@@ -1254,19 +1262,35 @@ ArcamSa20Plugin.prototype._stopPlaybackForAmpUnavailable = function() {
   try {
     if (this.commandRouter && typeof this.commandRouter.volumioStop === 'function') {
       const maybe = this.commandRouter.volumioStop();
-      return libQ.resolve(maybe).fail(() => stopViaSocket()).then(() => {
-        this._log('playback stopped after amplifier was unavailable for 5 minutes (' + this.lastAmpAvailabilityReason + ')');
-      });
+      this.ampUnavailableStopInFlight = libQ.resolve(maybe)
+        .fail(() => stopViaSocket())
+        .then(() => {
+          this._log('playback stopped because amplifier became unavailable (' + stopReason + ')');
+        })
+        .fin(() => {
+          this.ampUnavailableStopInFlight = null;
+        });
+      return this.ampUnavailableStopInFlight;
     }
   } catch (e) {
-    return stopViaSocket().then(() => {
-      this._log('playback stopped after amplifier was unavailable for 5 minutes (' + this.lastAmpAvailabilityReason + ')');
-    });
+    this.ampUnavailableStopInFlight = stopViaSocket()
+      .then(() => {
+        this._log('playback stopped because amplifier became unavailable (' + stopReason + ')');
+      })
+      .fin(() => {
+        this.ampUnavailableStopInFlight = null;
+      });
+    return this.ampUnavailableStopInFlight;
   }
 
-  return stopViaSocket().then(() => {
-    this._log('playback stopped after amplifier was unavailable for 5 minutes (' + this.lastAmpAvailabilityReason + ')');
-  });
+  this.ampUnavailableStopInFlight = stopViaSocket()
+    .then(() => {
+      this._log('playback stopped because amplifier became unavailable (' + stopReason + ')');
+    })
+    .fin(() => {
+      this.ampUnavailableStopInFlight = null;
+    });
+  return this.ampUnavailableStopInFlight;
 };
 
 ArcamSa20Plugin.prototype._armAmpUnavailableStopTimer = function(reason) {
@@ -1278,21 +1302,9 @@ ArcamSa20Plugin.prototype._armAmpUnavailableStopTimer = function(reason) {
     return;
   }
   this.lastAmpAvailabilityReason = reason || 'amplifier unavailable';
-  if ((conf.get('lastPower') || 'Unknown') === 'Standby') {
-    this._cancelAmpUnavailableStopTimer();
-    this._log('amplifier in standby while playing; stopping playback immediately (' + this.lastAmpAvailabilityReason + ')');
-    this._stopPlaybackForAmpUnavailable();
-    return;
-  }
-  if (this.ampUnavailableStopTimer) {
-    return;
-  }
-
-  this.ampUnavailableStopTimer = setTimeout(() => {
-    this._stopPlaybackForAmpUnavailable();
-  }, 300000);
-
-  this._log('amplifier unavailable while playing; stop timer armed for 300 seconds (' + this.lastAmpAvailabilityReason + ')');
+  this._cancelAmpUnavailableStopTimer();
+  this._log('amplifier unavailable while playing; stopping playback immediately (' + this.lastAmpAvailabilityReason + ')');
+  this._stopPlaybackForAmpUnavailable(this.lastAmpAvailabilityReason);
 };
 
 ArcamSa20Plugin.prototype._getPlaybackTargetSource = function() {
@@ -1423,7 +1435,7 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull, options) {
     .then(() => {
       this.ampStatusPollFailureCount = 0;
       const availability = this._evaluateAmpAvailability(conf.get('lastPower'), conf.get('lastSource'));
-      if (availability.available || !availability.confirmedUnavailable) {
+      if (availability.available) {
         this._clearAmpUnavailableState(availability.reason);
       } else {
         this._armAmpUnavailableStopTimer(availability.reason);
@@ -1435,12 +1447,7 @@ ArcamSa20Plugin.prototype._pollStatusAndReflect = function(forceFull, options) {
     .then(() => this._publishVolumeToVolumioIfChanged())
     .fail((err) => {
       this.ampStatusPollFailureCount += 1;
-      const cachedAvailability = this._evaluateAmpAvailability(conf.get('lastPower'), conf.get('lastSource'));
-      if (cachedAvailability.confirmedUnavailable) {
-        this._armAmpUnavailableStopTimer(cachedAvailability.reason + '; status polling failed');
-      } else {
-        this._cancelAmpUnavailableStopTimer();
-      }
+      this._armAmpUnavailableStopTimer('status polling failed: ' + err.message);
       conf.set('connectionState', this._getConnectionStateText());
       this._pushStatusSummaryRefreshIfChanged(conf.get('statusSummary')).fail(() => libQ.resolve());
       this._log('status poll failed: ' + err.message);
@@ -1462,7 +1469,7 @@ ArcamSa20Plugin.prototype._refreshStatusStrict = function(forceFull, options) {
     .then(() => {
       this.ampStatusPollFailureCount = 0;
       const availability = this._evaluateAmpAvailability(conf.get('lastPower'), conf.get('lastSource'));
-      if (availability.available || !availability.confirmedUnavailable) {
+      if (availability.available) {
         this._clearAmpUnavailableState(availability.reason);
       } else {
         this._armAmpUnavailableStopTimer(availability.reason);
